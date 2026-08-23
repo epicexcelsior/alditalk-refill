@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+.ruff_cache/
+.watch.lock
+.chrome-profile/
+config.json
+.gstack/

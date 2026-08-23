@@ -1,0 +1,11 @@
+{
+  "username": "YOUR_PHONE_NUMBER",
+  "password": "YOUR_PASSWORD",
+  "transport": "browser",
+  "chrome_path": null,
+  "chrome_profile_path": ".chrome-profile",
+  "watch_interval_seconds": 3600,
+  "jitter_fraction": 0.2,
+  "otp_command": null,
+  "otp_timeout_seconds": 120
+}

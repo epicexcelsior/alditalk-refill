@@ -1,0 +1,17 @@
+[Unit]
+Description=ALDI TALK data refill watcher
+After=network-online.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/alditalk-refill
+ExecStart=%h/alditalk-refill/.venv/bin/python %h/alditalk-refill/aldi.py watch
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+KillMode=mixed
+TimeoutStopSec=15
+Restart=on-abnormal
+
+[Install]
+WantedBy=graphical-session.target
