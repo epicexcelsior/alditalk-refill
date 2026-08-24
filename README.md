@@ -213,6 +213,17 @@ A read retry runs once when a page reload overlaps a read. An interrupted bookin
 
 The watcher keeps Chrome open and restarts it after a dead session. It backs off after transient errors with growing waits. A rejected password stops the process.
 
+### Laptops
+
+Install the autostart unit once. After that the client lives fully in the background:
+
+- Starts hidden with your desktop login. The Chrome window runs minimized.
+- No popups, no prompts, no tray icon. Contact happens by email only.
+- Checks run hourly while the laptop is on. Sleep or shutdown pauses them.
+- At wake-up it re-authenticates if the session expired and continues.
+- Cost: one idle Chrome process, roughly 300-500 MB RAM.
+- If you keep the laptop off for days, nothing happens; data usually does not drain either.
+
 ## Autostart
 
 ### Linux desktop
@@ -355,44 +366,6 @@ Guardrails:
 - Never invent or enable `otp_command`. Only the user provides one.
 - If login ends in an SMS prompt, stop and tell the user. Do not loop retries.
 - Do not book unless the user asked for that exact action. `check` and `probe` are read-only.
-
-## Approaches investigated
-
-### Headed Chrome with page-context API calls
-
-Result: selected.
-
-A fresh real Chrome 151 profile returned no OTP requirement. One controlled browser refill increased the balance. This transport preserves the real browser fingerprint. It removes routine dependency on dashboard selectors.
-
-### Direct Python client
-
-Result: retained only as `transport: "api"` for diagnosis.
-
-Login, offer reads, and threshold detection work. The bot check returned `botProtectionOtpRequired: true` on the test account.
-
-### Headless Chrome
-
-Result: rejected.
-
-Real Chrome 151 in headless mode reported no WebDriver marker. ALDI still required OTP. Hiding `navigator.webdriver` is not enough.
-
-### `gommzystudio/AldiTalk-True-Unlimited`
-
-Result: not used.
-
-The repository starts a new headless browser every 15 minutes. It clicks `1 GB` without balance verification. Its success log can appear when the click only opened the OTP dialog.
-
-### Direct update without bot validation
-
-Result: rejected.
-
-One public Go project posts directly to `updateUnlimited`. That sequence skips ALDI's bot-validation request. This client keeps `validateBotScore` in the official sequence.
-
-### Browser TLS impersonation
-
-Result: rejected.
-
-TLS impersonation cannot reproduce all headed-browser signals. Real headless Chrome already failed the same bot check.
 
 ## Tests
 
