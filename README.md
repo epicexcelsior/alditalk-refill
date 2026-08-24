@@ -44,6 +44,18 @@ Linux and macOS work today. Windows uses the same steps. Windows did not get a n
 
 Playwright connects to your installed Chrome. You do not need `playwright install`.
 
+## Quick setup (Linux and macOS)
+
+After cloning, run one command:
+
+```bash
+./scripts/setup.sh
+```
+
+The script checks Python and Chrome, creates `.venv`, installs dependencies, seeds `config.json`, and runs the tests. Add `--with-autostart` to also install the Linux autostart unit.
+
+Manual setup stays available below.
+
 ## Setup on Linux
 
 ```bash
