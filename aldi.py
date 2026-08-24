@@ -798,6 +798,7 @@ class ChromeAldiTalk(AldiTalk):
             "--profile-directory=Default",
             "--disable-extensions",
             "--start-minimized",
+            "--window-position=-32000,-32000",
             "--no-first-run",
             "--no-default-browser-check",
             "about:blank",
