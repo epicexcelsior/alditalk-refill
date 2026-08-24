@@ -1,6 +1,22 @@
 # ALDI TALK refill
 
-Never think about data refills again. This client watches one ALDI TALK tariff with free unlimited refills and books 1 GB the moment your data falls below ALDI's live threshold.
+**Unofficial automation for your own ALDI TALK line. Watches your data balance and books the free 1 GB refill automatically when it runs low — so you never think about it again.**
+
+---
+
+> ### Read this before you run anything
+>
+> **This tool is not affiliated with, endorsed by, or connected to ALDI TALK, Aldi Süd/Nord, Telefónica Germany, or E-Plus Service in any way.**
+>
+> - **It may violate ALDI TALK's terms of service.** It logs into your account with a script and uses private, undocumented endpoints. The realistic worst case is that ALDI suspends, blocks, or deletes **your account and phone number**. Nobody can promise they won't.
+> - **You accept that risk by running it.** The authors and contributors accept none of it. This software comes with **no warranty of any kind**. If it books wrong, breaks your tariff, leaks your credentials, or gets your number shut off, that is on you.
+> - **Use it only for accounts you own.** Storing other people's credentials makes you responsible for them.
+> - **Private endpoints change without notice.** When ALDI redesigns their portal, this stops working until someone fixes it.
+> - Nothing in this repository is legal advice. Check the [current ALDI TALK service terms](https://www.alditalk.de/leistungsbeschreibung) yourself and decide.
+
+---
+
+## How it works
 
 ```
                 every ~60 minutes
@@ -26,12 +42,11 @@ Never think about data refills again. This client watches one ALDI TALK tariff w
 
 The client drives a real Chrome window with its own profile. It sends portal backend requests from that logged-in page. It does not click dashboard buttons. If a session dies, it logs in again on its own.
 
-ALDI TALK uses private endpoints and can change them at any time. The [service terms](https://www.alditalk.de/leistungsbeschreibung) limit scripts and unauthorized access. Use this client only with your own account. Do not run a shared credential service.
-
----
+Each watch cycle loads one page and reads a few JSON answers. About 24 page loads per day — lighter than opening the app yourself once.
 
 ## Contents
 
+- [Disclaimer](#read-this-before-you-run-anything)
 - [Status](#status)
 - [Platform support](#platform-support)
 - [Requirements](#requirements)

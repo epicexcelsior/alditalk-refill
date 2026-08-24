@@ -2,6 +2,8 @@
 
 Operational facts for setting up and running this client. `aldi.py` is the source of truth. Read this before changing code.
 
+This is an unofficial tool that may violate ALDI TALK's terms; account-level consequences are possible. Never present it as sanctioned, never bypass risk controls, never run it against accounts whose owner has not consented.
+
 ## Production reference (f5server)
 
 - Host: Tailscale `f5server` (100.112.98.110), Ubuntu 22.04, Alaska US
