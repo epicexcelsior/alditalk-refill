@@ -1,46 +1,90 @@
 # ALDI TALK refill
 
-This client watches one ALDI TALK tariff with free unlimited refills. It books 1 GB when your data falls below ALDI's live threshold.
+Never think about data refills again. This client watches one ALDI TALK tariff with free unlimited refills and books 1 GB the moment your data falls below ALDI's live threshold.
 
-The client runs a real Chrome window with its own profile. It sends portal backend requests from that logged-in page. It does not click dashboard buttons.
+```
+                every ~60 minutes
+  ┌──────────────────────────────────────────────┐
+  │  aldi.py watch                               │
+  │                                              │
+  │   real Chrome (headed, own profile)          │
+  │        │  logs in like you would             │
+  │        ▼                                     │
+  │   "how much data is left?"                   │
+  │        │                                     │
+  │        ├── above threshold ──► sleep         │
+  │        │                                     │
+  │        └── at/below 1 GB                     │
+  │                 ▼                            │
+  │            bot check OK? ──► book 1 GB       │
+  │                 ▼              (free)        │
+  │            verify balance went up            │
+  │                 ▼                            │
+  │            email confirmation                │
+  └──────────────────────────────────────────────┘
+```
 
-ALDI TALK uses private endpoints. ALDI can change these endpoints at any time. The [service terms](https://www.alditalk.de/leistungsbeschreibung) limit scripts and unauthorized access.
+The client drives a real Chrome window with its own profile. It sends portal backend requests from that logged-in page. It does not click dashboard buttons. If a session dies, it logs in again on its own.
 
-Use this client only with your own account. Do not run a shared credential service.
+ALDI TALK uses private endpoints and can change them at any time. The [service terms](https://www.alditalk.de/leistungsbeschreibung) limit scripts and unauthorized access. Use this client only with your own account. Do not run a shared credential service.
+
+---
+
+## Contents
+
+- [Status](#status)
+- [Platform support](#platform-support)
+- [Requirements](#requirements)
+- [Quick setup](#quick-setup-linux-and-macos)
+- [Configuration](#configuration)
+- [Commands](#commands)
+- [Watcher behavior](#watcher-behavior)
+- [Autostart](#autostart)
+- [Server deployment](#server-deployment)
+- [Updates](#updates)
+- [Email alerts](#email-alerts)
+- [SMS verification fallback](#sms-verification-fallback)
+- [IP location risk](#ip-location-risk)
+- [One account versus several accounts](#one-account-versus-several-accounts)
+- [Instructions for AI agents](#instructions-for-ai-agents)
+- [Approaches investigated](#approaches-investigated)
+- [Tests](#tests)
+- [Known limits](#known-limits)
 
 ## Status
 
-Verified on 2026-08-23 with Chrome 151 on Ubuntu:
+Verified against the live portal:
 
-- A fresh Chrome profile logged in without copied browser state.
-- Headed Chrome returned `botProtectionOtpRequired: false`.
-- A controlled booking added 1 GB to the domestic balance.
-- The packaged watcher detected 0.72 GB, booked 1 GB, and verified the new balance.
-- Nineteen automated tests pass.
+| When | What |
+| --- | --- |
+| 2026-08-23 | Fresh Chrome profile logged in without copied browser state |
+| 2026-08-23 | Headed Chrome passed the bot check with no OTP demand |
+| 2026-08-23 | Watcher detected 0.72 GB, booked 1 GB, verified the new balance |
+| 2026-08-24 | Headless server (Xvfb + headed Chrome) logged in from a US IP |
+| 2026-08-24 | Session self-healing observed live: dead session, auto re-login |
+| 2026-08-24 | Email alert path verified through Resend |
 
-## How it works
+25 automated tests pass on every push (see CI badge in your repository).
 
-1. The client starts installed Chrome in headed mode. The window starts minimized.
-2. Chrome uses the private `.chrome-profile` directory.
-3. The client logs in through the normal login page.
-4. The client reads your subscription and offer through the portal backend.
-5. The client compares your domestic balance with ALDI's live threshold.
-6. When a refill is due, the client calls `validateBotScore`.
-7. The client submits `updateUnlimited` when ALDI permits the refill.
-8. The client verifies that the domestic balance increased.
+## Platform support
 
-Each watch cycle loads the dashboard page once. The default interval is one hour plus jitter. This gives about 24 page loads per day.
+| Platform | State | Autostart | Notes |
+| --- | --- | --- | --- |
+| Linux desktop | Verified | systemd user unit | The reference setup |
+| Linux server (headless) | Verified | systemd + Xvfb | See [Server deployment](#server-deployment) |
+| macOS | Code-ready, not runtime-tested | LaunchAgent | Needs Python 3.10+ and installed Chrome |
+| Windows | Code-ready, not runtime-tested | Task Scheduler | Same steps as macOS; report failures |
 
-A read retry runs once when a page reload overlaps a read. An interrupted booking never retries at once. The next cycle reads the balance first.
+The client works wherever a real desktop Chrome runs. It never works headless without a virtual display. The first `check` run is the test on any new device: if it prints balances, that device works.
 
 ## Requirements
 
 - Python 3.10 or later
 - Google Chrome or Chromium
-- A graphical desktop session
+- A graphical desktop session (real or Xvfb)
 - An eligible ALDI TALK offer
 
-Linux and macOS work today. Windows uses the same steps. Windows did not get a native runtime test yet. All platforms need a desktop session. A headless server cannot run this client directly. See "Server deployment" for the virtual display option.
+Linux and macOS work today. Windows uses the same steps but did not get a native runtime test yet.
 
 Playwright connects to your installed Chrome. You do not need `playwright install`.
 
@@ -107,7 +151,15 @@ Windows support is code-complete but not runtime-tested. Report failures instead
   "watch_interval_seconds": 3600,
   "jitter_fraction": 0.2,
   "otp_command": null,
-  "otp_timeout_seconds": 120
+  "otp_timeout_seconds": 120,
+  "alerts": {
+    "resend_api_key": "env:RESEND_API_KEY",
+    "from": "alerts@your-verified-domain.de",
+    "to": "you@example.com",
+    "on_booking": true,
+    "on_failure": true,
+    "failure_threshold": 3
+  }
 }
 ```
 
@@ -120,33 +172,6 @@ The Chrome profile holds authenticated cookies. Keep it private. Never commit or
 Use one profile directory per account. Never run two processes against one profile.
 
 Keep the interval at or above 3600 seconds. Jitter breaks the fixed schedule.
-
-## Email alerts
-
-Alerts are optional. Delete the `alerts` object to run silent.
-
-```json
-"alerts": {
-  "resend_api_key": "env:RESEND_API_KEY",
-  "from": "alerts@your-verified-domain.de",
-  "to": "you@example.com",
-  "on_booking": true,
-  "on_failure": true,
-  "failure_threshold": 3
-}
-```
-
-The client sends mail through [Resend](https://resend.com). `from` must use a domain that you verified in Resend.
-
-`resend_api_key` accepts a literal key or an `env:NAME` indirection. Prefer `env:` and export the variable in the service environment. The client reads it at send time only.
-
-The watcher sends these mails:
-
-- One confirmation after each booked refill, when `on_booking` is true.
-- One alert when failures reach `failure_threshold` in a row.
-- One final alert before exit on a rejected password or a required SMS check.
-
-A failed delivery never stops the watcher. It prints one log line instead.
 
 ## Commands
 
@@ -182,7 +207,11 @@ Start the watcher after desktop login:
 .venv/bin/python aldi.py watch
 ```
 
-The watcher keeps Chrome open. It restarts Chrome after a dead session. It backs off after transient errors. A rejected password stops the process.
+Each cycle loads the dashboard page once. The default interval is one hour plus jitter. This gives about 24 page loads per day.
+
+A read retry runs once when a page reload overlaps a read. An interrupted booking never retries at once. The next cycle reads the balance first.
+
+The watcher keeps Chrome open and restarts it after a dead session. It backs off after transient errors with growing waits. A rejected password stops the process.
 
 ## Autostart
 
@@ -228,9 +257,9 @@ xvfb-run -a .venv/bin/python aldi.py check
 ```
 
 4. If the check passes, install `systemd/alditalk-refill-server.service`. It wraps the watcher in Xvfb.
-5. Enable auto-updates with `systemd/alditalk-refill-update.timer`. See "Updates".
+5. Enable auto-updates with `systemd/alditalk-refill-update.timer`. See [Updates](#updates).
 
-Test the real bot check from your server IP before you rely on it. See "IP location risk".
+Test the real bot check from your server IP before you rely on it. See [IP location risk](#ip-location-risk).
 
 ## Updates
 
@@ -247,6 +276,22 @@ ln -sfn "$PWD/systemd/alditalk-refill-update.timer" ~/.config/systemd/user/aldit
 systemctl --user daemon-reload
 systemctl --user enable --now alditalk-refill-update.timer
 ```
+
+## Email alerts
+
+Alerts are optional. Delete the `alerts` object to run silent.
+
+The client sends mail through [Resend](https://resend.com). `from` must use a domain that you verified in Resend.
+
+`resend_api_key` accepts a literal key or an `env:NAME` indirection. Prefer `env:` and export the variable in the service environment. The client reads it at send time only.
+
+The watcher sends these mails:
+
+- One confirmation after each booked refill, when `on_booking` is true.
+- One alert when failures reach `failure_threshold` in a row.
+- One final alert before exit on a rejected password or a required SMS check.
+
+A failed delivery never stops the watcher. It prints one log line instead.
 
 ## SMS verification fallback
 
@@ -275,7 +320,7 @@ Rules for a server outside Germany:
 2. Run `watch` for one day. Confirm zero OTP prompts in the log.
 3. Stop at the first SMS prompt. Move the client to a German IP or accept manual OTP handling.
 
-A German VPS or a home connection in Germany gives the lowest risk.
+A German VPS or a home connection in Germany gives the lowest risk. A US residential ISP passed during testing; treat that as luck, not a guarantee.
 
 ## One account versus several accounts
 
@@ -291,11 +336,10 @@ Deploy this client on a new machine with this checklist. Read `aldi.py` before y
 
 1. Install Python 3.10 or later and Google Chrome.
 2. Clone the repository into the user's home directory.
-3. Create a virtual environment. Install `requirements.txt`.
-4. Copy `config.example.json` to `config.json`. On Linux and macOS run `chmod 600 config.json`.
-5. Ask the user for their phone number and password. Write them into `config.json`, or set `ALDITALK_USERNAME` and `ALDITALK_PASSWORD`.
-6. Run `check`. Confirm the output shows an offer name, status `active`, and balances.
-7. Start the watcher after desktop login. Use systemd, a LaunchAgent, or Task Scheduler.
+3. Run `./scripts/setup.sh`. On Windows follow "Setup on Windows" instead.
+4. Ask the user for their phone number and password. Write them into `config.json`, or set `ALDITALK_USERNAME` and `ALDITALK_PASSWORD`.
+5. Run `check`. Confirm the output shows an offer name, status `active`, and balances.
+6. Start the watcher after desktop login. Use systemd, a LaunchAgent, or Task Scheduler.
 
 Platform notes:
 
@@ -312,6 +356,44 @@ Guardrails:
 - If login ends in an SMS prompt, stop and tell the user. Do not loop retries.
 - Do not book unless the user asked for that exact action. `check` and `probe` are read-only.
 
+## Approaches investigated
+
+### Headed Chrome with page-context API calls
+
+Result: selected.
+
+A fresh real Chrome 151 profile returned no OTP requirement. One controlled browser refill increased the balance. This transport preserves the real browser fingerprint. It removes routine dependency on dashboard selectors.
+
+### Direct Python client
+
+Result: retained only as `transport: "api"` for diagnosis.
+
+Login, offer reads, and threshold detection work. The bot check returned `botProtectionOtpRequired: true` on the test account.
+
+### Headless Chrome
+
+Result: rejected.
+
+Real Chrome 151 in headless mode reported no WebDriver marker. ALDI still required OTP. Hiding `navigator.webdriver` is not enough.
+
+### `gommzystudio/AldiTalk-True-Unlimited`
+
+Result: not used.
+
+The repository starts a new headless browser every 15 minutes. It clicks `1 GB` without balance verification. Its success log can appear when the click only opened the OTP dialog.
+
+### Direct update without bot validation
+
+Result: rejected.
+
+One public Go project posts directly to `updateUnlimited`. That sequence skips ALDI's bot-validation request. This client keeps `validateBotScore` in the official sequence.
+
+### Browser TLS impersonation
+
+Result: rejected.
+
+TLS impersonation cannot reproduce all headed-browser signals. Real headless Chrome already failed the same bot check.
+
 ## Tests
 
 Run the automated tests:
@@ -320,7 +402,7 @@ Run the automated tests:
 .venv/bin/python -m unittest -v
 ```
 
-Nineteen tests cover login callbacks, offer selection, threshold boundaries, booking payloads, OTP handling, session expiry, write safety, and the browser transport.
+25 tests cover login callbacks, offer selection, threshold boundaries, booking payloads, OTP handling, session expiry, email alerts, write safety, and the browser transport.
 
 The source HAR stays outside this repository. It contains account data.
 
@@ -334,5 +416,6 @@ The source HAR stays outside this repository. It contains account data.
 - ALDI publishes no idempotency key for the refill request.
 - ALDI can change its portal, bot check, authentication, or endpoints at any time.
 - ALDI can require SMS verification again.
+- Usage readings can lag behind real consumption. The client books only on a confirmed below-threshold reading, so lag delays a booking; it never causes a wrong one.
 
 This design is the lowest-maintenance path verified on one account. Do not treat it as bulletproof.
