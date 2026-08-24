@@ -333,9 +333,8 @@ class AldiTalkTests(unittest.TestCase):
                 '{"username":"user","password":"password"}', encoding="utf-8"
             )
             config_path.chmod(0o600)
-            with (
-                patch.object(aldi, "CONFIG_PATH", config_path),
-                patch.dict(aldi.os.environ, {}, clear=True),
+            with patch.dict(
+                aldi.os.environ, {"ALDITALK_CONFIG_DIR": directory}
             ):
                 config = aldi.load_config()
 
