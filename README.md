@@ -109,6 +109,33 @@ Use one profile directory per account. Never run two processes against one profi
 
 Keep the interval at or above 3600 seconds. Jitter breaks the fixed schedule.
 
+## Email alerts
+
+Alerts are optional. Delete the `alerts` object to run silent.
+
+```json
+"alerts": {
+  "resend_api_key": "env:RESEND_API_KEY",
+  "from": "alerts@your-verified-domain.de",
+  "to": "you@example.com",
+  "on_booking": true,
+  "on_failure": true,
+  "failure_threshold": 3
+}
+```
+
+The client sends mail through [Resend](https://resend.com). `from` must use a domain that you verified in Resend.
+
+`resend_api_key` accepts a literal key or an `env:NAME` indirection. Prefer `env:` and export the variable in the service environment. The client reads it at send time only.
+
+The watcher sends these mails:
+
+- One confirmation after each booked refill, when `on_booking` is true.
+- One alert when failures reach `failure_threshold` in a row.
+- One final alert before exit on a rejected password or a required SMS check.
+
+A failed delivery never stops the watcher. It prints one log line instead.
+
 ## Commands
 
 | Command | Action |

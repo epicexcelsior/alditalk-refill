@@ -35,6 +35,7 @@ BFF207 = "/scs/bff/scs-207-customer-master-data-bff/customer-master-data"
 BFF209 = "/scs/bff/scs-209-selfcare-dashboard-bff/selfcare-dashboard"
 
 KIB_PER_GB = 1048576
+RESEND_API_URL = "https://api.resend.com/emails"
 CONFIG_PATH = Path(__file__).parent / "config.json"
 LOCK_PATH = Path(__file__).parent / ".watch.lock"
 DEFAULT_CHROME_PROFILE_PATH = Path(__file__).parent / ".chrome-profile"
@@ -123,6 +124,34 @@ def load_config():
     if transport not in ("browser", "api"):
         sys.exit("transport must be browser or api.")
 
+    raw_alerts = cfg.get("alerts")
+    if raw_alerts is None:
+        alerts_cfg = None
+    else:
+        if not isinstance(raw_alerts, dict):
+            sys.exit("alerts must be an object or null.")
+        api_key = raw_alerts.get("resend_api_key")
+        if not isinstance(api_key, str) or not api_key:
+            sys.exit("alerts.resend_api_key must be a non-empty string.")
+        for field in ("from", "to"):
+            value = raw_alerts.get(field)
+            if not isinstance(value, str) or "@" not in value:
+                sys.exit(f"alerts.{field} must contain an email address.")
+        try:
+            failure_threshold = int(raw_alerts.get("failure_threshold", 3))
+        except (TypeError, ValueError):
+            sys.exit("alerts.failure_threshold must be a number.")
+        if failure_threshold < 1:
+            sys.exit("alerts.failure_threshold must be at least 1.")
+        alerts_cfg = {
+            "resend_api_key": api_key,
+            "from": raw_alerts["from"],
+            "to": raw_alerts["to"],
+            "on_booking": bool(raw_alerts.get("on_booking", True)),
+            "on_failure": bool(raw_alerts.get("on_failure", True)),
+            "failure_threshold": failure_threshold,
+        }
+
     chrome_path = cfg.get("chrome_path")
     if chrome_path is not None and not isinstance(chrome_path, str):
         sys.exit("chrome_path must be a string or null.")
@@ -150,7 +179,42 @@ def load_config():
     cfg["transport"] = transport
     cfg["chrome_path"] = chrome_path
     cfg["chrome_profile_path"] = chrome_profile_path
+    cfg["alerts"] = alerts_cfg
     return cfg
+
+
+def resolve_secret(value):
+    if value.startswith("env:"):
+        return os.environ.get(value[4:]) or None
+    return value or None
+
+
+def send_alert(alerts_cfg, subject, body):
+    if not alerts_cfg:
+        return False
+    api_key = resolve_secret(alerts_cfg["resend_api_key"])
+    if not api_key:
+        print("Alert skipped: resend API key unavailable (env var unset?).")
+        return False
+    try:
+        r = requests.post(
+            RESEND_API_URL,
+            json={
+                "from": alerts_cfg["from"],
+                "to": [alerts_cfg["to"]],
+                "subject": subject,
+                "text": body,
+            },
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=20,
+        )
+    except requests.RequestException as e:
+        print(f"Alert delivery failed: {e}")
+        return False
+    if r.status_code >= 300:
+        print(f"Alert delivery failed: HTTP {r.status_code}: {r.text[:200]}")
+        return False
+    return True
 
 
 def acquire_watch_lock():
@@ -1067,6 +1131,7 @@ def cmd_book(client):
 def cmd_watch(cfg, client):
     interval = int(cfg.get("watch_interval_seconds", 3600))
     jitter = float(cfg.get("jitter_fraction", 0.2))
+    alerts = cfg.get("alerts")
     failures = 0
     while True:
         try:
@@ -1075,16 +1140,48 @@ def cmd_watch(cfg, client):
             print(f"[{time.strftime('%F %T')}] {rem / KIB_PER_GB:.2f} GB remaining")
             if client.refill_is_due(offer, packs):
                 print("At or below the refill threshold, booking...")
-                client.book_one_gb()
+                _, _, packs_after = client.book_one_gb()
+                if alerts and alerts["on_booking"]:
+                    rem_after = client.remaining_kb(packs_after) / KIB_PER_GB
+                    send_alert(
+                        alerts,
+                        "ALDI TALK refill booked",
+                        f"Booked 1 GB at {time.strftime('%F %T')}. "
+                        f"Domestic balance is now about {rem_after:.2f} GB.",
+                    )
             failures = 0
         except LoginRejected as e:
+            if alerts and alerts["on_failure"]:
+                send_alert(
+                    alerts,
+                    "ALDI TALK watcher stopped: login rejected",
+                    f"The watcher exited at {time.strftime('%F %T')}.\n{e}",
+                )
             sys.exit(f"FATAL credentials rejected: {e}")
         except OtpRequired as e:
+            if alerts and alerts["on_failure"]:
+                send_alert(
+                    alerts,
+                    "ALDI TALK watcher stopped: SMS verification required",
+                    f"The watcher exited at {time.strftime('%F %T')}.\n{e}\n"
+                    "Log in once through the portal to clear it.",
+                )
             sys.exit(f"FATAL OTP automation stopped: {e}")
         except (SessionDead, RuntimeError, requests.RequestException, ValueError) as e:
             failures += 1
             wait = min(1800, interval * (2 ** min(failures - 1, 4)))
             print(f"[{time.strftime('%F %T')}] Error ({e}); backing off {wait}s")
+            if (
+                alerts
+                and alerts["on_failure"]
+                and failures == alerts["failure_threshold"]
+            ):
+                send_alert(
+                    alerts,
+                    f"ALDI TALK watcher failing ({failures} consecutive cycles)",
+                    f"Last error at {time.strftime('%F %T')}:\n{e}\n"
+                    "The watcher keeps retrying with backoff.",
+                )
             time.sleep(wait)
             continue
         time.sleep(interval * (1 + JITTER_RANDOM.uniform(-jitter, jitter)))

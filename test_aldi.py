@@ -423,5 +423,106 @@ class AldiTalkTests(unittest.TestCase):
         self.assertEqual(len(client._page.calls), 1)
 
 
+class AlertsTest(unittest.TestCase):
+    ALERTS = {
+        "resend_api_key": "env:RESEND_API_KEY",
+        "from": "alerts@example.com",
+        "to": "user@example.com",
+        "on_booking": True,
+        "on_failure": True,
+        "failure_threshold": 3,
+    }
+
+    def make_client(self):
+        client = aldi.AldiTalk("user", "password")
+        client.contract_id = "contract-navigation"
+        return client
+
+    def test_resolve_secret_reads_env_indirection(self):
+        with patch.dict(aldi.os.environ, {"RESEND_API_KEY": "re_test123"}):
+            self.assertEqual(aldi.resolve_secret("env:RESEND_API_KEY"), "re_test123")
+        self.assertIsNone(aldi.resolve_secret("env:MISSING_VAR"))
+        self.assertEqual(aldi.resolve_secret("re_literal"), "re_literal")
+
+    def test_send_alert_posts_resend_payload(self):
+        sent = {}
+
+        def fake_post(url, **kwargs):
+            sent["url"] = url
+            sent["kwargs"] = kwargs
+            return FakeResponse({"id": "abc"}, status_code=200)
+
+        with (
+            patch.dict(aldi.os.environ, {"RESEND_API_KEY": "re_test123"}),
+            patch.object(aldi.requests, "post", side_effect=fake_post),
+        ):
+            ok = aldi.send_alert(self.ALERTS, "Subject", "Body")
+
+        self.assertTrue(ok)
+        self.assertEqual(sent["url"], aldi.RESEND_API_URL)
+        self.assertEqual(
+            sent["kwargs"]["json"]["to"], ["user@example.com"]
+        )
+        self.assertEqual(sent["kwargs"]["headers"]["Authorization"], "Bearer re_test123")
+
+    def test_send_alert_survives_http_errors(self):
+        with (
+            patch.dict(aldi.os.environ, {"RESEND_API_KEY": "re_test123"}),
+            patch.object(
+                aldi.requests, "post", return_value=FakeResponse({}, status_code=422)
+            ),
+        ):
+            self.assertFalse(aldi.send_alert(self.ALERTS, "s", "b"))
+
+    def test_send_alert_without_config_is_a_noop(self):
+        self.assertFalse(aldi.send_alert(None, "s", "b"))
+
+    def test_watch_sends_one_booking_alert(self):
+        client = self.make_client()
+        live_offer = offer()
+        client.ensure_session = lambda: ({}, live_offer, live_offer["pack"])
+        client.book_one_gb = Mock(return_value=({}, live_offer, live_offer["pack"]))
+        cfg = {
+            "watch_interval_seconds": 600,
+            "jitter_fraction": 0.2,
+            "alerts": dict(self.ALERTS, on_failure=False),
+        }
+
+        with (
+            patch.object(aldi.time, "sleep") as sleep,
+            patch.object(aldi, "send_alert") as alert,
+            redirect_stdout(StringIO()),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            sleep.side_effect = KeyboardInterrupt
+            aldi.cmd_watch(cfg, client)
+
+        alert.assert_called_once()
+        self.assertIn("refill booked", alert.call_args.args[1])
+
+    def test_watch_alerts_once_at_the_failure_threshold(self):
+        client = self.make_client()
+        client.ensure_session = Mock(side_effect=RuntimeError("boom"))
+        cfg = {
+            "watch_interval_seconds": 600,
+            "jitter_fraction": 0.2,
+            "alerts": dict(self.ALERTS, failure_threshold=3),
+        }
+
+        with (
+            patch.object(aldi.time, "sleep") as sleep,
+            patch.object(aldi, "send_alert") as alert,
+            redirect_stdout(StringIO()),
+        ):
+            sleep.side_effect = [None, None, KeyboardInterrupt]
+            try:
+                aldi.cmd_watch(cfg, client)
+            except KeyboardInterrupt:
+                pass
+
+        alert.assert_called_once()
+        self.assertIn("3 consecutive", alert.call_args.args[1])
+
+
 if __name__ == "__main__":
     unittest.main()

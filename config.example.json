@@ -7,5 +7,13 @@
   "watch_interval_seconds": 3600,
   "jitter_fraction": 0.2,
   "otp_command": null,
-  "otp_timeout_seconds": 120
+  "otp_timeout_seconds": 120,
+  "alerts": {
+    "resend_api_key": "env:RESEND_API_KEY",
+    "from": "alerts@your-verified-domain.de",
+    "to": "you@example.com",
+    "on_booking": true,
+    "on_failure": true,
+    "failure_threshold": 3
+  }
 }
