@@ -3,8 +3,8 @@ Description=ALDI refill watchdog witness check
 
 [Service]
 Type=oneshot
-EnvironmentFile=/etc/music-system/resend.env
-Environment=WATCHDOG_FROM=ALDI watchdog <alerts@mail.epicexcelsior.com>
+EnvironmentFile=%h/watchdog/resend.env
+Environment="WATCHDOG_FROM=ALDI watchdog <alerts@mail.epicexcelsior.com>"
 Environment=WATCHDOG_TO=epicexcelsior@gmail.com
 ExecStart=%h/watchdog/scripts/watchdog_check.sh
 TimeoutStartSec=60
