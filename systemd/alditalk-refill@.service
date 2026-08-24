@@ -1,0 +1,19 @@
+[Unit]
+Description=ALDI TALK refill watcher (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/alditalk-accounts/%i
+Environment=ALDITALK_CONFIG_DIR=%h/alditalk-accounts/%i
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+ExecStart=%h/alditalk-refill/.venv/bin/python %h/alditalk-refill/aldi.py watch
+KillMode=mixed
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=default.target

@@ -86,6 +86,35 @@ Reboot persistence requires `loginctl show-user <user> | grep Linger=yes`.
 | Chrome crashes | Display/RAM problem | Check Xvfb, memory |
 | Update git error 128 | Deploy key broken | Recreate key, reset `core.sshCommand` |
 
+## Multi-account hosting
+
+One server can host a few accounts. `ALDITALK_CONFIG_DIR` moves config, lock, and default Chrome profile into a per-account directory, so instances stay isolated.
+
+```bash
+scripts/account.sh add <name>     # scaffold ~/alditalk-accounts/<name>, staggered interval
+scripts/account.sh list
+scripts/account.sh remove <name>  # stop + archive
+```
+
+Mechanics:
+
+- Template unit: `systemd/alditalk-refill@.service`, instance name = folder name. Shares the repo venv.
+- Interval offset: base 3600 s plus a name checksum (0-899 s), so accounts never poll in sync.
+- Update script restarts every active `alditalk-refill@*` instance after pulling.
+- Alert routing: set each account's own `alerts.to`; one shared Resend key is fine.
+
+Limits and risks. Keep the total at five or fewer:
+
+1. All accounts log in from one IP. Risk flagging is per-account today; a future pattern ban hits everyone at once, owner included.
+2. You hold their portal credentials and session cookies on your disk. You are their breach radius.
+3. OTP demands halt that person's watcher until they act on their phone.
+
+Consent checklist per person before adding them:
+
+- They know a script holds their password and books refills for them.
+- They know which email receives alerts.
+- They have a way to reach you when their watcher stops.
+
 ## Guardrails
 
 - Never commit/print/transmit `config.json` or `.chrome-profile` (live credentials).

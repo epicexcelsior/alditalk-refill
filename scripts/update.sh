@@ -21,4 +21,7 @@ git reset --hard origin/main
 
 systemctl --user restart alditalk-refill-server.service || true
 systemctl --user try-restart alditalk-refill.service 2>/dev/null || true
+for u in $(systemctl --user list-units 'alditalk-refill@*' --no-legend --plain 2>/dev/null | awk '$3=="active" {print $1}'); do
+    systemctl --user try-restart "$u"
+done
 echo "$(date -Is) update complete"

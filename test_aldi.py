@@ -1,4 +1,5 @@
 import unittest
+import json
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -314,6 +315,17 @@ class AldiTalkTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "HTTP 500"):
             client._portal_get_json("/broken")
 
+    def test_config_dir_override_moves_config_lock_and_profile(self):
+        with TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            cfg_path.write_text(json.dumps({"username": "0123", "password": "pw"}))
+            cfg_path.chmod(0o600)
+            with patch.dict(aldi.os.environ, {"ALDITALK_CONFIG_DIR": tmp}):
+                aldi.load_config()
+            self.assertEqual(aldi.CONFIG_DIR, Path(tmp).resolve())
+            self.assertEqual(aldi.CONFIG_PATH, (Path(tmp) / "config.json").resolve())
+            self.assertEqual(aldi.LOCK_PATH, (Path(tmp) / ".watch.lock").resolve())
+
     def test_config_defaults_to_headed_browser_and_hourly_checks(self):
         with TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.json"
@@ -341,8 +353,7 @@ class AldiTalkTests(unittest.TestCase):
             )
             config_path.chmod(0o600)
             with (
-                patch.object(aldi, "CONFIG_PATH", config_path),
-                patch.dict(aldi.os.environ, {}, clear=True),
+                patch.dict(aldi.os.environ, {"ALDITALK_CONFIG_DIR": directory}),
                 self.assertRaisesRegex(SystemExit, "dedicated subdirectory"),
             ):
                 aldi.load_config()

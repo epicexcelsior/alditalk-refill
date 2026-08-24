@@ -36,8 +36,9 @@ BFF209 = "/scs/bff/scs-209-selfcare-dashboard-bff/selfcare-dashboard"
 
 KIB_PER_GB = 1048576
 RESEND_API_URL = "https://api.resend.com/emails"
-CONFIG_PATH = Path(__file__).parent / "config.json"
-LOCK_PATH = Path(__file__).parent / ".watch.lock"
+CONFIG_DIR = Path(__file__).parent.resolve()
+CONFIG_PATH = CONFIG_DIR / "config.json"
+LOCK_PATH = CONFIG_DIR / ".watch.lock"
 DEFAULT_CHROME_PROFILE_PATH = Path(__file__).parent / ".chrome-profile"
 JITTER_RANDOM = secrets.SystemRandom()
 
@@ -55,6 +56,12 @@ class OtpRequired(RuntimeError):
 
 
 def load_config():
+    global CONFIG_DIR, CONFIG_PATH, LOCK_PATH
+    CONFIG_DIR = Path(
+        os.environ.get("ALDITALK_CONFIG_DIR", Path(__file__).parent)
+    ).resolve()
+    CONFIG_PATH = CONFIG_DIR / "config.json"
+    LOCK_PATH = CONFIG_DIR / ".watch.lock"
     try:
         cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -164,12 +171,13 @@ def load_config():
     else:
         chrome_profile_path = Path(profile_setting).expanduser()
         if not chrome_profile_path.is_absolute():
-            chrome_profile_path = Path(__file__).parent / chrome_profile_path
+            chrome_profile_path = CONFIG_DIR / chrome_profile_path
     chrome_profile_path = chrome_profile_path.resolve()
     project_path = Path(__file__).parent.resolve()
+    config_dir_path = CONFIG_DIR
     home_path = Path.home().resolve()
     root_path = Path(chrome_profile_path.anchor)
-    if chrome_profile_path in (project_path, home_path, root_path):
+    if chrome_profile_path in (project_path, config_dir_path, home_path, root_path):
         sys.exit("chrome_profile_path must name a dedicated subdirectory.")
 
     cfg["watch_interval_seconds"] = interval

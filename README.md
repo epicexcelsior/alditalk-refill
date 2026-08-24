@@ -339,7 +339,18 @@ Use one project copy and one Chrome profile for your own account.
 
 For friends, each person runs a separate copy on their own computer. Credentials and sessions stay on their machine.
 
-A central service for 5 to 20 accounts raises credential, policy, and anti-bot risks. This repository does not implement that model.
+You can also host a few accounts on one server. Each account gets its own directory, config, Chrome profile, and staggered schedule:
+
+```bash
+scripts/account.sh add mom        # scaffold, then fill mom's config.json
+systemctl --user enable --now alditalk-refill@mom.service
+scripts/account.sh list           # show all instances
+scripts/account.sh remove mom     # stop and archive
+```
+
+See CONTEXT.md "Multi-account hosting" before you do this. Understand the shared-IP risk and credential custody. Keep the total small.
+
+## Instructions for AI agents
 
 ## Instructions for AI agents
 
