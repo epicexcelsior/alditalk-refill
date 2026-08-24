@@ -1,0 +1,8 @@
+[Unit]
+Description=ALDI refill watchdog heartbeat push
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.alditalk/watchdog.env
+ExecStart=%h/alditalk-refill/scripts/watchdog_heartbeat.sh
+TimeoutStartSec=60

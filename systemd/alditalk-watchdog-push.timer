@@ -1,0 +1,10 @@
+[Unit]
+Description=ALDI refill watchdog heartbeat schedule
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
