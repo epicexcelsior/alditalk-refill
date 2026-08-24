@@ -88,6 +88,20 @@ Reboot persistence requires `loginctl show-user <user> | grep Linger=yes`.
 | Chrome crashes | Display/RAM problem | Check Xvfb, memory |
 | Update git error 128 | Deploy key broken | Recreate key, reset `core.sshCommand` |
 
+## Watchdog (dead man's switch)
+
+A second always-on host ("witness", currently the music cloud VPS) watches the writer:
+
+- Writer pushes an hourly heartbeat (`scripts/watchdog_heartbeat.sh`, unit `alditalk-watchdog-push.*`) over SSH to `epic@100.119.115.55:~/watchdog/heartbeat.json`. Payload: service active, remaining GB, minutes since last cycle, bookings today. Push key: `~/.ssh/watchdog_push_ed25519`.
+- Witness runs hourly (`scripts/watchdog_check.sh`, units `alditalk-watchdog-check.*` in `~/watchdog/`) and emails via Resend when:
+  - heartbeat older than 90 min (server or network down)
+  - heartbeat says service inactive
+  - last balance read older than 100 min (Chrome/login stuck)
+  - balance < 1 GB with zero verified bookings today (refill stuck)
+- Witness env: `~/watchdog/resend.env` (600), sender `alerts@mail.epicexcelsior.com`.
+
+Test procedure: backdate the heartbeat (`touch -d "3 hours ago"`) and start the check service; expect a silence email. Re-push to restore.
+
 ## Multi-account hosting
 
 One server can host a few accounts. `ALDITALK_CONFIG_DIR` moves config, lock, and default Chrome profile into a per-account directory, so instances stay isolated.

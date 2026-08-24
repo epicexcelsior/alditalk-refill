@@ -56,7 +56,7 @@ if [ "$MINUTES" != "null" ] && [ "$MINUTES" -gt 100 ]; then
 fi
 
 IS_NUM=$(echo "$REMAINING" | grep -cE '^[0-9]+(\.[0-9]+)?$' || true)
-if [ "$IS_NUM" = "1" ] && [ "$(echo "$REMAINING < 1.0" | bc)" = "1" ] && [ "$BOOKINGS" = "0" ]; then
+if [ "$IS_NUM" = "1" ] && [ "$(awk -v r="$REMAINING" 'BEGIN{print (r<1.0)}')" = "1" ] && [ "$BOOKINGS" = "0" ]; then
     send_mail "balance below threshold with no booking today" \
         "Remaining data is ${REMAINING} GB, but no refill was verified today. The writer may be stuck below the threshold."
 fi

@@ -303,6 +303,10 @@ systemctl --user daemon-reload
 systemctl --user enable --now alditalk-refill-update.timer
 ```
 
+## Watchdog
+
+A second always-on machine receives an hourly signed heartbeat from the writer. If the writer goes silent, its service dies, or data sits below 1 GB without a verified booking, you get an email from a machine that is still alive. Setup details live in CONTEXT.md "Watchdog".
+
 ## Email alerts
 
 Alerts are optional. Delete the `alerts` object to run silent.
