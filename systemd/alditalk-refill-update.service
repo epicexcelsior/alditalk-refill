@@ -1,0 +1,7 @@
+[Unit]
+Description=ALDI TALK refill self-update
+
+[Service]
+Type=oneshot
+ExecStart=%h/alditalk-refill/scripts/update.sh
+TimeoutStartSec=300

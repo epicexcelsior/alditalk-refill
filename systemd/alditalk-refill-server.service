@@ -1,0 +1,18 @@
+[Unit]
+Description=ALDI TALK refill watcher (headless server via Xvfb)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/alditalk-refill
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+ExecStart=/usr/bin/xvfb-run -a --server-args="-screen 0 1280x900x24" %h/alditalk-refill/.venv/bin/python %h/alditalk-refill/aldi.py watch
+KillMode=mixed
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=ALDI TALK refill self-update schedule
+
+[Timer]
+OnCalendar=*-*-* 06:00 Europe/Berlin
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
