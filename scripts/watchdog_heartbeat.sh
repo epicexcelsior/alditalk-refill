@@ -64,12 +64,12 @@ def integer_or_zero(value):
         return 0
 
 print(json.dumps({
-    'ts': int(time.time()),
-    'service_active': os.environ['SERVICE_ACTIVE'] == 'active',
-    'remaining_gb': numeric_or_none(os.environ['REMAINING']),
-    'minutes_since_cycle': integer_or_zero(os.environ['MINUTES_SINCE']),
-    'bookings_today': integer_or_zero(os.environ['BOOKINGS_TODAY']),
-    'last_error': os.environ['ERROR_MESSAGE'] or None,
+    "ts": int(time.time()),
+    "service_active": os.environ["SERVICE_ACTIVE"] == "active",
+    "remaining_gb": numeric_or_none(os.environ["REMAINING"]),
+    "minutes_since_cycle": integer_or_zero(os.environ["MINUTES_SINCE"]),
+    "bookings_today": integer_or_zero(os.environ["BOOKINGS_TODAY"]),
+    "last_error": os.environ["ERROR_MESSAGE"] or None,
 }))')
 
 TARGET="${WATCHDOG_TARGET:?WATCHDOG_TARGET not set}"
