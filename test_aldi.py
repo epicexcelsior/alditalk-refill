@@ -293,6 +293,21 @@ class AldiTalkTests(unittest.TestCase):
 
         self.assertTrue(aldi.AldiTalk.refill_is_due(live_offer, packs))
 
+    def test_remaining_kb_accepts_portal_decimal_and_exponent_notation(self):
+        packs = [
+            data_pack(allocated="2.62144E7", used="2.4880202E7"),
+        ]
+
+        self.assertEqual(aldi.AldiTalk.remaining_kb(packs), 1_334_198)
+
+    def test_remaining_kb_rejects_fractional_or_non_finite_kib(self):
+        for allocated, used in (("NaN", "1"), ("100.5", "1"), ("100", "Infinity")):
+            with self.subTest(allocated=allocated, used=used):
+                with self.assertRaisesRegex(RuntimeError, "invalid allocated or used"):
+                    aldi.AldiTalk.remaining_kb(
+                        [data_pack(allocated=allocated, used=used)]
+                    )
+
     def test_refill_verification_rejects_an_unchanged_balance(self):
         client = self.make_client()
         unchanged = offer(pack=[data_pack(allocated=2_000_000, used=1_500_000)])

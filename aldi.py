@@ -1,5 +1,6 @@
 import base64
 import binascii
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import os
@@ -512,7 +513,25 @@ class AldiTalk:
         return payload, offer, packs
 
     @staticmethod
-    def remaining_kb(packs):
+    def _pack_kib(pack, field):
+        """Read ALDI's whole-KiB fields, including decimal/exponent notation."""
+        value = pack.get(field)
+        if isinstance(value, bool):
+            raise RuntimeError("Data pack has invalid allocated or used values.")
+        try:
+            kib = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise RuntimeError("Data pack has invalid allocated or used values.") from exc
+        if (
+            not kib.is_finite()
+            or kib < 0
+            or kib != kib.to_integral_value()
+        ):
+            raise RuntimeError("Data pack has invalid allocated or used values.")
+        return int(kib)
+
+    @classmethod
+    def remaining_kb(cls, packs):
         standard = next(
             (
                 p
@@ -525,12 +544,7 @@ class AldiTalk:
             raise RuntimeError("No data pack found.")
         if standard.get("unit") != "kilobytes":
             raise RuntimeError(f"Unexpected data unit: {standard.get('unit')!r}")
-        try:
-            return int(standard["allocated"]) - int(standard["used"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(
-                "Data pack has invalid allocated or used values."
-            ) from exc
+        return cls._pack_kib(standard, "allocated") - cls._pack_kib(standard, "used")
 
     @staticmethod
     def _positive_offer_int(offer, field):
@@ -1117,7 +1131,8 @@ def cmd_check(client):
     rem = client.remaining_kb(packs)
     print(f"Offer: {offer.get('offerName')}  status={offer.get('status')}")
     for p in packs:
-        a, u = int(p.get("allocated", 0)), int(p.get("used", 0))
+        a = client._pack_kib(p, "allocated")
+        u = client._pack_kib(p, "used")
         tag = (
             "roaming"
             if p.get("balanceAttributeReference") == "dataGrantAmountFUP"

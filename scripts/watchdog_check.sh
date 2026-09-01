@@ -42,6 +42,7 @@ SERVICE=$(jq -r '.service_active' "$HEARTBEAT")
 REMAINING=$(jq -r '.remaining_gb' "$HEARTBEAT")
 MINUTES=$(jq -r '.minutes_since_cycle' "$HEARTBEAT")
 BOOKINGS=$(jq -r '.bookings_today' "$HEARTBEAT")
+LAST_ERROR=$(jq -r '.last_error // empty' "$HEARTBEAT")
 
 [ "$SERVICE" = "true" ] || send_mail "watcher service not active" \
     "Heartbeat arrived but reports the systemd service is not active."
@@ -52,7 +53,7 @@ case "$MINUTES" in
 esac
 if [ "$MINUTES" != "null" ] && [ "$MINUTES" -gt 100 ]; then
     send_mail "no check cycle for $MINUTES minutes" \
-        "Heartbeat is fresh but the last successful balance read was $MINUTES minutes ago. Chrome or login may be stuck."
+        "Heartbeat is fresh but the last successful balance read was $MINUTES minutes ago. Chrome, login, or the portal response may be stuck. Last error: ${LAST_ERROR:-none}."
 fi
 
 IS_NUM=$(echo "$REMAINING" | grep -cE '^[0-9]+(\.[0-9]+)?$' || true)
