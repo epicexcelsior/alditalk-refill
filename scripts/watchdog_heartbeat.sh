@@ -10,13 +10,17 @@ JOURNAL="journalctl --user -u alditalk-refill-server --no-pager -o short-iso"
 
 SERVICE_ACTIVE=$(systemctl --user is-active alditalk-refill-server.service || true)
 
-LAST_LINE=$($JOURNAL | grep -E "GB remaining|Booked .* verified" | tail -1 || true)
+LAST_CYCLE_LINE=$($JOURNAL | grep -E "GB remaining|Booked .* verified" | tail -1 || true)
+LAST_BALANCE_LINE=$($JOURNAL | grep -E "GB remaining" | tail -1 || true)
 LAST_ERROR=$($JOURNAL | grep -E "\] Error \(" | tail -1 || true)
-if [ -n "$LAST_LINE" ]; then
-    LAST_TS=$(echo "$LAST_LINE" | cut -c1-19)
-    REMAINING=$(echo "$LAST_LINE" | grep -oE "[0-9]+\.[0-9]+ GB remaining" | grep -oE "[0-9]+\.[0-9]+" || echo "null")
+if [ -n "$LAST_CYCLE_LINE" ]; then
+    LAST_TS=$(echo "$LAST_CYCLE_LINE" | cut -c1-19)
 else
     LAST_TS=""
+fi
+if [ -n "$LAST_BALANCE_LINE" ]; then
+    REMAINING=$(echo "$LAST_BALANCE_LINE" | grep -oE "[0-9]+\.[0-9]+ GB remaining" | grep -oE "[0-9]+\.[0-9]+" || echo "null")
+else
     REMAINING="null"
 fi
 
@@ -35,27 +39,38 @@ fi
 
 BOOKINGS_TODAY=$($JOURNAL --since today | grep -c "verified the new balance" || true)
 
-ERROR_MESSAGE=None
+ERROR_MESSAGE=""
 ERROR_TS=""
 if [ -n "$LAST_ERROR" ]; then
     ERROR_TS=$(echo "$LAST_ERROR" | cut -c1-19)
 fi
 if [ -n "$LAST_ERROR" ] && { [ -z "$LAST_TS" ] || [ "$ERROR_TS" \> "$LAST_TS" ]; }; then
-    ERROR_MESSAGE=$(echo "$LAST_ERROR" | sed -E 's/^.{20}.*\] Error \((.*)\); backing off .*/\1/' | python3 -c '
-import json, sys
-print(json.dumps(sys.stdin.read().strip()))')
+    ERROR_MESSAGE=$(echo "$LAST_ERROR" | sed -E 's/^.{20}.*\] Error \((.*)\); backing off .*/\1/')
 fi
 
-PAYLOAD=$(python3 -c "
-import json, time
+PAYLOAD=$(SERVICE_ACTIVE="$SERVICE_ACTIVE" REMAINING="$REMAINING" MINUTES_SINCE="$MINUTES_SINCE" BOOKINGS_TODAY="$BOOKINGS_TODAY" ERROR_MESSAGE="$ERROR_MESSAGE" python3 -c '
+import json, os, time
+
+def numeric_or_none(value):
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+def integer_or_zero(value):
+    try:
+        return int(value)
+    except ValueError:
+        return 0
+
 print(json.dumps({
     'ts': int(time.time()),
-    'service_active': '$SERVICE_ACTIVE' == 'active',
-    'remaining_gb': $REMAINING,
-    'minutes_since_cycle': $MINUTES_SINCE,
-    'bookings_today': $BOOKINGS_TODAY,
-    'last_error': $ERROR_MESSAGE,
-}))")
+    'service_active': os.environ['SERVICE_ACTIVE'] == 'active',
+    'remaining_gb': numeric_or_none(os.environ['REMAINING']),
+    'minutes_since_cycle': integer_or_zero(os.environ['MINUTES_SINCE']),
+    'bookings_today': integer_or_zero(os.environ['BOOKINGS_TODAY']),
+    'last_error': os.environ['ERROR_MESSAGE'] or None,
+}))')
 
 TARGET="${WATCHDOG_TARGET:?WATCHDOG_TARGET not set}"
 REMOTE_DIR="${WATCHDOG_PATH:-watchdog}"
