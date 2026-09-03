@@ -82,19 +82,22 @@ Reboot persistence requires `loginctl show-user <user> | grep Linger=yes`.
 | Symptom | Meaning | Action |
 | --- | --- | --- |
 | `Session dead - restarting Chrome` | Normal self-heal on 401/403/redirect | None |
-| `Session check failed (...) - restarting Chrome` | Auto-recovery on 5xx / portal response error | None |
+| `Session check failed (...) - restarting Chrome` | Auto-recovery on portal response error | None |
+| `Transient portal error (...) - retrying once` | Single 5xx/429/invalid-JSON blip, same-session retry | None; restart follows only when it persists |
 | `FATAL OTP automation stopped` | Risk engine wants SMS | User logs in via real browser once; restart |
 | `FATAL credentials rejected` | Bad password | User updates config; restart |
 | Booking verified failure | Not applied | Check portal manually; report; no retry |
 | Chrome crashes | Display/RAM problem | Check Xvfb, memory |
 | Update git error 128 | Deploy key broken | Recreate key, reset `core.sshCommand` |
+| Update tests fail | Bad upstream commit | `update.sh` rolls back to previous HEAD automatically |
 
 ## Watchdog (dead man's switch)
 
 A second always-on host ("witness", currently the music cloud VPS) watches the writer:
 
 - Writer pushes an hourly heartbeat (`scripts/watchdog_heartbeat.sh`, unit `alditalk-watchdog-push.*`) over SSH to `epic@100.119.115.55:~/watchdog/heartbeat.json`. Payload: service active, remaining GB, minutes since last cycle, bookings today. Push key: `~/.ssh/watchdog_push_ed25519`.
-- Witness runs hourly (`scripts/watchdog_check.sh`, units `alditalk-watchdog-check.*` in `~/watchdog/`) with alert throttling (3-hour duplicate cooldown) and recovery notifications, and emails via Resend when:
+- The watcher writes `.watch-state.json` in `CONFIG_DIR` each cycle (remaining GB, last cycle time, last error). The heartbeat prefers this file and falls back to journal parsing only when the file is missing or older than 2 h, so log-format changes no longer break monitoring. Override with `WATCH_STATE_FILE`.
+- Witness runs hourly (`scripts/watchdog_check.sh`, units `alditalk-watchdog-check.*` in `~/watchdog/`) with alert throttling (3-hour duplicate cooldown, stable `silent` key) and recovery notifications, and emails via Resend when:
   - heartbeat older than 90 min (server or network down)
   - heartbeat says service inactive
   - last balance read older than 100 min (Chrome/login stuck)

@@ -16,8 +16,18 @@ fi
 
 echo "$(date -Is) updating $LOCAL -> $REMOTE"
 git reset --hard origin/main
-.venv/bin/python -m pip install -q -r requirements.txt
-.venv/bin/python -m unittest
+rollback() {
+    echo "$(date -Is) update failed, rolling back to $LOCAL"
+    git reset --hard "$LOCAL" || true
+    systemctl --user try-restart alditalk-refill-server.service 2>/dev/null || true
+    exit 1
+}
+if ! .venv/bin/python -m pip install -q -r requirements.txt; then
+    rollback
+fi
+if ! .venv/bin/python -m unittest; then
+    rollback
+fi
 
 systemctl --user restart alditalk-refill-server.service || true
 systemctl --user try-restart alditalk-refill.service 2>/dev/null || true

@@ -278,6 +278,7 @@ class AldiTalkTests(unittest.TestCase):
 
         with (
             patch.object(aldi.time, "sleep") as sleep,
+            patch.object(aldi, "write_watch_state"),
             self.assertRaisesRegex(SystemExit, "OTP failed"),
             redirect_stdout(StringIO()),
         ):
@@ -552,6 +553,7 @@ class AldiTalkTests(unittest.TestCase):
 
         with (
             patch.object(aldi.time, "sleep", side_effect=fake_sleep),
+            patch.object(aldi, "write_watch_state"),
             redirect_stdout(StringIO()),
         ):
             try:
@@ -560,6 +562,161 @@ class AldiTalkTests(unittest.TestCase):
                 pass
 
         self.assertEqual(sleep_calls, [30, 60, 120, 300, 600])
+
+    def test_transient_error_is_a_runtime_error(self):
+        self.assertTrue(issubclass(aldi.TransientPortalError, RuntimeError))
+        err = aldi.TransientPortalError("portal down")
+        self.assertIsInstance(err, RuntimeError)
+
+    def test_portal_5xx_raises_transient_not_fatal(self):
+        client = self.make_client()
+        client.session = FakeSession(get_responses=[FakeResponse({}, status_code=503)])
+        with self.assertRaises(aldi.TransientPortalError):
+            client._portal_get_json("/offers")
+
+    def test_portal_429_raises_transient(self):
+        client = self.make_client()
+        client.session = FakeSession(get_responses=[FakeResponse({}, status_code=429)])
+        with self.assertRaises(aldi.TransientPortalError):
+            client._portal_get_json("/offers")
+
+    def test_portal_invalid_json_raises_transient(self):
+        client = self.make_client()
+        client.session = FakeSession(get_responses=[FakeResponse(None)])
+        with self.assertRaises(aldi.TransientPortalError):
+            client._portal_get_json("/offers")
+
+    def test_browser_5xx_raises_transient(self):
+        client = aldi.ChromeAldiTalk("user", "password")
+        client._page = FakeBrowserPage(
+            {
+                "status": 503,
+                "url": aldi.PORTAL_BASE + "/offers",
+                "contentType": "application/json",
+                "text": "{}",
+            }
+        )
+        with self.assertRaises(aldi.TransientPortalError):
+            client._portal_get_json("/offers")
+
+    def test_browser_invalid_json_raises_transient(self):
+        client = aldi.ChromeAldiTalk("user", "password")
+        client._page = FakeBrowserPage(
+            {
+                "status": 200,
+                "url": aldi.PORTAL_BASE + "/offers",
+                "contentType": "application/json",
+                "text": "not-json{{{",
+            }
+        )
+        with self.assertRaises(aldi.TransientPortalError):
+            client._portal_get_json("/offers")
+
+    def test_chrome_ensure_session_retries_transient_without_restart(self):
+        client = aldi.ChromeAldiTalk("user", "password")
+        client._page = FakeBrowserPage({"status": 200})
+        client.contract_id = "test-contract"
+        live_offer = offer()
+        calls = []
+
+        def fake_snapshot():
+            calls.append(1)
+            if len(calls) == 1:
+                raise aldi.TransientPortalError(
+                    "Portal returned HTTP 503 on /offers (transient)."
+                )
+            return ({}, live_offer, live_offer["pack"])
+
+        client.get_offer_snapshot = fake_snapshot
+        client.close = Mock()
+        client.login = Mock()
+        with (
+            patch.object(aldi.time, "sleep") as sleep,
+            redirect_stdout(StringIO()),
+        ):
+            _, selected, _ = client.ensure_session()
+        self.assertEqual(selected["offerId"], "offer-live")
+        client.close.assert_not_called()
+        client.login.assert_not_called()
+        sleep.assert_called_once()
+
+    def test_chrome_ensure_session_restarts_after_persistent_transient(self):
+        client = aldi.ChromeAldiTalk("user", "password")
+        client._page = FakeBrowserPage({"status": 200})
+        client.contract_id = "test-contract"
+        live_offer = offer()
+        client.get_offer_snapshot = Mock(
+            side_effect=aldi.TransientPortalError("Portal 503 (transient).")
+        )
+        client.close = Mock()
+        client.login = Mock(side_effect=lambda: setattr(client, "_page", FakeBrowserPage({"status": 200})))
+        # second snapshot after login still fails -> ensure_session raises
+        snapshots = [
+            aldi.TransientPortalError("first"),
+            aldi.TransientPortalError("retry"),
+            aldi.TransientPortalError("after login"),
+        ]
+
+        def fake_snapshot():
+            res = snapshots.pop(0)
+            if isinstance(res, Exception):
+                raise res
+            return res
+
+        client.get_offer_snapshot = fake_snapshot
+        with (
+            patch.object(aldi.time, "sleep"),
+            redirect_stdout(StringIO()),
+            self.assertRaises(aldi.TransientPortalError),
+        ):
+            client.ensure_session()
+        client.login.assert_called_once()
+        self.assertGreaterEqual(client.close.call_count, 1)
+
+    def test_offer_snapshot_error_names_portal_change(self):
+        client = self.make_client()
+        client._portal_get_json = lambda path, params=None: {"subscribedOffers": []}
+        with self.assertRaisesRegex(RuntimeError, "response shape may have changed"):
+            client.get_offer_snapshot()
+
+    def test_offer_snapshot_no_eligible_names_offers(self):
+        client = self.make_client()
+        inactive = offer(status="inactive", isOnDemandRefillApplicable=False)
+        client._portal_get_json = lambda path, params=None: {
+            "subscribedOffers": [inactive]
+        }
+        with self.assertRaisesRegex(RuntimeError, "offers=1"):
+            client.get_offer_snapshot()
+
+    def test_watch_state_roundtrip(self):
+        with TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            cfg_path.write_text(json.dumps({"username": "0123", "password": "pw"}))
+            cfg_path.chmod(0o600)
+            with patch.dict(aldi.os.environ, {"ALDITALK_CONFIG_DIR": tmp}):
+                aldi.load_config()
+            self.assertEqual(aldi.STATE_PATH, (Path(tmp) / ".watch-state.json").resolve())
+            with redirect_stdout(StringIO()):
+                aldi.record_watch_success(2_097_152)
+            state = aldi.read_watch_state()
+            self.assertEqual(state["remaining_gb"], 2.0)
+            self.assertIsNone(state["last_error"])
+            self.assertIn("last_cycle_ts", state)
+            with redirect_stdout(StringIO()):
+                aldi.record_watch_error("boom")
+            state = aldi.read_watch_state()
+            self.assertEqual(state["last_error"], "boom")
+            self.assertEqual(state["remaining_gb"], 2.0)
+
+    def test_config_dir_override_moves_state_path(self):
+        with TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            cfg_path.write_text(json.dumps({"username": "0123", "password": "pw"}))
+            cfg_path.chmod(0o600)
+            with patch.dict(aldi.os.environ, {"ALDITALK_CONFIG_DIR": tmp}):
+                aldi.load_config()
+            self.assertEqual(aldi.CONFIG_DIR, Path(tmp).resolve())
+            self.assertEqual(aldi.STATE_PATH, (Path(tmp) / ".watch-state.json").resolve())
 
 
 class AlertsTest(unittest.TestCase):
@@ -630,6 +787,7 @@ class AlertsTest(unittest.TestCase):
         with (
             patch.object(aldi.time, "sleep") as sleep,
             patch.object(aldi, "send_alert") as alert,
+            patch.object(aldi, "write_watch_state"),
             redirect_stdout(StringIO()),
             self.assertRaises(KeyboardInterrupt),
         ):
@@ -651,6 +809,7 @@ class AlertsTest(unittest.TestCase):
         with (
             patch.object(aldi.time, "sleep") as sleep,
             patch.object(aldi, "send_alert") as alert,
+            patch.object(aldi, "write_watch_state"),
             redirect_stdout(StringIO()),
         ):
             sleep.side_effect = [None, None, KeyboardInterrupt]

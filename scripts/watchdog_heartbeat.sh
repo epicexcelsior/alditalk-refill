@@ -10,6 +10,23 @@ JOURNAL="journalctl --user -u alditalk-refill-server --no-pager -o short-iso"
 
 SERVICE_ACTIVE=$(systemctl --user is-active alditalk-refill-server.service || true)
 
+# Preferred source: structured state written by aldi.py each watch cycle.
+# Falls back to journal parsing only when the state file is missing/stale.
+STATE_FILE="${WATCH_STATE_FILE:-$HOME/alditalk-refill/.watch-state.json}"
+USE_STATE=0
+STATE_REMAINING="null"
+STATE_MINUTES="null"
+STATE_ERROR=""
+if [ -f "$STATE_FILE" ]; then
+    STATE_AGE=$(( $(date +%s) - $(stat -c %Y "$STATE_FILE") ))
+    if [ "$STATE_AGE" -lt 7200 ]; then
+        USE_STATE=1
+        STATE_REMAINING=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("remaining_gb") or "null")' "$STATE_FILE" 2>/dev/null || echo "null")
+        STATE_MINUTES=$(python3 -c 'import json,time,sys; d=json.load(open(sys.argv[1])); ts=d.get("last_cycle_ts"); print(int((time.time()-ts)//60)) if ts else print("null")' "$STATE_FILE" 2>/dev/null || echo "null")
+        STATE_ERROR=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("last_error") or "")' "$STATE_FILE" 2>/dev/null || echo "")
+    fi
+fi
+
 LAST_CYCLE_LINE=$($JOURNAL | grep -E "GB remaining|Booked .* verified" | tail -1 || true)
 LAST_BALANCE_LINE=$($JOURNAL | grep -E "GB remaining" | tail -1 || true)
 LAST_ERROR=$($JOURNAL | grep -E "\] Error \(" | tail -1 || true)
@@ -48,19 +65,25 @@ if [ -n "$LAST_ERROR" ] && { [ -z "$LAST_TS" ] || [ "$ERROR_TS" \> "$LAST_TS" ];
     ERROR_MESSAGE=$(echo "$LAST_ERROR" | sed -E 's/^.{20}.*\] Error \((.*)\); backing off .*/\1/')
 fi
 
+if [ "$USE_STATE" = "1" ]; then
+    REMAINING="$STATE_REMAINING"
+    MINUTES_SINCE="$STATE_MINUTES"
+    ERROR_MESSAGE="$STATE_ERROR"
+fi
+
 PAYLOAD=$(SERVICE_ACTIVE="$SERVICE_ACTIVE" REMAINING="$REMAINING" MINUTES_SINCE="$MINUTES_SINCE" BOOKINGS_TODAY="$BOOKINGS_TODAY" ERROR_MESSAGE="$ERROR_MESSAGE" python3 -c '
 import json, os, time
 
 def numeric_or_none(value):
     try:
         return float(value)
-    except ValueError:
+    except (TypeError, ValueError):
         return None
 
 def integer_or_zero(value):
     try:
         return int(value)
-    except ValueError:
+    except (TypeError, ValueError):
         return 0
 
 print(json.dumps({

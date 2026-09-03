@@ -41,12 +41,22 @@ RESEND_API_URL = "https://api.resend.com/emails"
 CONFIG_DIR = Path(__file__).parent.resolve()
 CONFIG_PATH = CONFIG_DIR / "config.json"
 LOCK_PATH = CONFIG_DIR / ".watch.lock"
+STATE_PATH = CONFIG_DIR / ".watch-state.json"
 DEFAULT_CHROME_PROFILE_PATH = Path(__file__).parent / ".chrome-profile"
 JITTER_RANDOM = secrets.SystemRandom()
 
 
 class SessionDead(Exception):
     pass
+
+
+class TransientPortalError(RuntimeError):
+    """Portal temporarily unavailable (5xx/429/invalid JSON).
+
+    Subclasses RuntimeError so existing watch-loop handling keeps working.
+    Unlike SessionDead it must not force an immediate Chrome restart:
+    callers retry once on the same session before re-authenticating.
+    """
 
 
 class LoginRejected(Exception):
@@ -58,12 +68,13 @@ class OtpRequired(RuntimeError):
 
 
 def load_config():
-    global CONFIG_DIR, CONFIG_PATH, LOCK_PATH
+    global CONFIG_DIR, CONFIG_PATH, LOCK_PATH, STATE_PATH
     CONFIG_DIR = Path(
         os.environ.get("ALDITALK_CONFIG_DIR", Path(__file__).parent)
     ).resolve()
     CONFIG_PATH = CONFIG_DIR / "config.json"
     LOCK_PATH = CONFIG_DIR / ".watch.lock"
+    STATE_PATH = CONFIG_DIR / ".watch-state.json"
     try:
         cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -225,6 +236,59 @@ def send_alert(alerts_cfg, subject, body):
         print(f"Alert delivery failed: HTTP {r.status_code}: {r.text[:200]}")
         return False
     return True
+
+
+def read_watch_state():
+    """Return the last structured watcher state, or {} when unavailable."""
+    try:
+        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_watch_state(*, remaining_gb=None, last_cycle_ts=None, last_error=None):
+    """Persist one watch-cycle outcome for the watchdog heartbeat.
+
+    The heartbeat script prefers this file over parsing journal text, so a
+    log-format change can no longer break monitoring. Failures here must
+    never stop the watcher.
+    """
+    try:
+        previous = read_watch_state()
+        now = int(time.time())
+        if remaining_gb is None:
+            remaining_gb = previous.get("remaining_gb")
+        if last_cycle_ts is None:
+            last_cycle_ts = previous.get("last_cycle_ts")
+        payload = {
+            "ts": now,
+            "remaining_gb": remaining_gb,
+            "last_cycle_ts": last_cycle_ts,
+            "last_error": last_error,
+        }
+        tmp = STATE_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(tmp, STATE_PATH)
+        if os.name != "nt":
+            try:
+                os.chmod(STATE_PATH, 0o600)
+            except OSError:
+                pass
+    except OSError as exc:
+        print(f"Watch state write failed: {exc}")
+
+
+def record_watch_success(remaining_kb_value):
+    write_watch_state(
+        remaining_gb=round(remaining_kb_value / KIB_PER_GB, 2),
+        last_cycle_ts=int(time.time()),
+        last_error=None,
+    )
+
+
+def record_watch_error(message):
+    write_watch_state(last_error=str(message)[:300])
 
 
 def acquire_watch_lock():
@@ -450,6 +514,10 @@ class AldiTalk:
             or "/signin" in final_url
         ):
             raise SessionDead(f"HTTP {r.status_code} on {path}")
+        if r.status_code == 429 or 500 <= r.status_code < 600:
+            raise TransientPortalError(
+                f"Portal returned HTTP {r.status_code} on {path} (transient)."
+            )
         r.raise_for_status()
         if "text/html" in ctype:
             raise SessionDead(f"Portal returned a login page on {path}")
@@ -460,7 +528,9 @@ class AldiTalk:
         try:
             return r.json()
         except ValueError as exc:
-            raise RuntimeError(f"Portal returned invalid JSON on {path}") from exc
+            raise TransientPortalError(
+                f"Portal returned invalid JSON on {path} (transient)."
+            ) from exc
 
     def _portal_get_json(self, path, params=None):
         return self._portal_request_json("get", path, params=params or {})
@@ -488,7 +558,11 @@ class AldiTalk:
         payload = self._portal_get_json(f"{BFF207}/v1/navigation-list", params)
         subs = payload.get("userDetails", {}).get("subscriptions", [])
         if not subs or not subs[0].get("contractId"):
-            raise RuntimeError("No subscription in navigation-list.")
+            count = len(subs) if isinstance(subs, list) else 0
+            raise RuntimeError(
+                "No subscription in navigation-list "
+                f"(subscriptions={count}). Portal response shape may have changed."
+            )
         return subs[0]["contractId"]
 
     def get_offer_snapshot(self):
@@ -498,7 +572,10 @@ class AldiTalk:
         )
         offers = payload.get("subscribedOffers", [])
         if not offers:
-            raise RuntimeError("The offers response has no subscribed offers.")
+            raise RuntimeError(
+                "The offers response has no subscribed offers. "
+                "Portal response shape may have changed."
+            )
         offer = next(
             (
                 candidate
@@ -509,8 +586,21 @@ class AldiTalk:
             None,
         )
         if offer is None:
-            raise RuntimeError("No active offer is eligible for on-demand refill.")
+            summary = ",".join(
+                f"{o.get('status')}/{o.get('isOnDemandRefillApplicable')}"
+                for o in offers[:5]
+            )
+            raise RuntimeError(
+                "No active offer is eligible for on-demand refill "
+                f"(offers={len(offers)}: {summary}). Portal offers may have changed."
+            )
         packs = [p for p in offer.get("pack", []) if p.get("type") == "data"]
+        if not packs:
+            pack_count = len(offer.get("pack", []) or [])
+            raise RuntimeError(
+                f"No data pack found (pack entries={pack_count}). "
+                "Portal pack shape may have changed."
+            )
         return payload, offer, packs
 
     @staticmethod
@@ -707,9 +797,23 @@ class AldiTalk:
     def ensure_session(self):
         if self.session is None or self.contract_id is None:
             self.login()
-            return self.get_offer_snapshot()
+            try:
+                return self.get_offer_snapshot()
+            except TransientPortalError as exc:
+                print(f"Transient portal error ({exc}) - retrying once...")
+                time.sleep(5)
+                return self.get_offer_snapshot()
         try:
             return self.get_offer_snapshot()
+        except TransientPortalError as exc:
+            print(f"Transient portal error ({exc}) - retrying once...")
+            time.sleep(5)
+            try:
+                return self.get_offer_snapshot()
+            except TransientPortalError:
+                print("Transient error persists - re-authenticating...")
+                self.login()
+                return self.get_offer_snapshot()
         except Exception as exc:
             print(f"Session check failed ({exc}) - re-authenticating...")
             self.login()
@@ -906,13 +1010,37 @@ class ChromeAldiTalk(AldiTalk):
             }"""
         )
 
+    def _login_diagnostics(self):
+        """Best-effort login context without credentials for faster fixes."""
+        try:
+            url = self._page.url if self._page is not None else "no-page"
+        except Exception:
+            url = "unavailable"
+        try:
+            title = (
+                self._page.evaluate("() => document.title || ''")
+                if self._page is not None and not self._page.is_closed()
+                else ""
+            )
+        except Exception:
+            title = ""
+        return f"url={url} title={title[:120]!r}"
+
     def _login_flow(self):
         self._start_browser()
         self._page.goto(OVERVIEW_URL, wait_until="domcontentloaded", timeout=60_000)
         if not self._authenticated_portal_url(self._page.url):
-            self._page.wait_for_selector(
-                'input[autocomplete="username"]:visible', timeout=30_000
-            )
+            try:
+                self._page.wait_for_selector(
+                    'input[autocomplete="username"], input[name*="user" i], '
+                    'input[id*="user" i], input[type="tel"]:visible',
+                    timeout=30_000,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "The login form is not available "
+                    f"({self._login_diagnostics()}). Portal form may have changed."
+                ) from exc
             self._accept_cookie_dialog()
             proof = self._page.locator(
                 'input[name*="proof" i], input[id*="proof" i]'
@@ -924,23 +1052,27 @@ class ChromeAldiTalk(AldiTalk):
                     timeout=10_000,
                 )
             self._page.locator(
-                'input[autocomplete="username"]:visible'
-            ).fill(self.username)
+                'input[autocomplete="username"], input[name*="user" i]:visible'
+            ).first.fill(self.username)
             self._page.locator(
-                'input[autocomplete="current-password"]:visible'
-            ).fill(self.password)
-            buttons = self._page.locator("one-button:visible")
+                'input[autocomplete="current-password"], '
+                'input[type="password"]:visible'
+            ).first.fill(self.password)
+            buttons = self._page.locator("one-button:visible, button:visible")
             login_button = next(
                 (
                     buttons.nth(index)
                     for index in range(buttons.count())
                     if " ".join(buttons.nth(index).inner_text().split())
-                    == "Anmelden"
+                    in ("Anmelden", "Login", "Einloggen")
                 ),
                 None,
             )
             if login_button is None:
-                raise RuntimeError("The login button is not available.")
+                raise RuntimeError(
+                    "The login button is not available "
+                    f"({self._login_diagnostics()}). Portal form may have changed."
+                )
             # Usercentrics can cover the component after its consent action
             # runs. Invoke ALDI's component handler without a pointer event.
             login_button.evaluate("element => element.click()")
@@ -954,6 +1086,11 @@ class ChromeAldiTalk(AldiTalk):
                 )
                 if failed.count() and failed.first.is_visible():
                     raise LoginRejected("The portal rejected the login.")
+                failed_en = self._page.locator('[role="alert"]').filter(
+                    has_text="login failed"
+                )
+                if failed_en.count() and failed_en.first.is_visible():
+                    raise LoginRejected("The portal rejected the login.")
                 if (
                     self._chrome_process is not None
                     and self._chrome_process.poll() is not None
@@ -961,16 +1098,22 @@ class ChromeAldiTalk(AldiTalk):
                     raise RuntimeError("Chrome stopped during login.")
                 time.sleep(0.25)
             else:
-                raise RuntimeError("The browser login did not reach the portal.")
+                raise RuntimeError(
+                    "The browser login did not reach the portal "
+                    f"({self._login_diagnostics()}). Portal flow may have changed."
+                )
 
         self._page.wait_for_load_state("domcontentloaded", timeout=30_000)
         for attempt in range(3):
             try:
                 self.contract_id = self._get_contract_id()
                 break
-            except Exception:
+            except Exception as exc:
                 if attempt == 2:
-                    raise
+                    raise RuntimeError(
+                        f"Login reached the portal but contract lookup failed: "
+                        f"{exc} ({self._login_diagnostics()})"
+                    ) from exc
                 time.sleep(1)
 
     def login(self, max_attempts=2):
@@ -1040,7 +1183,9 @@ class ChromeAldiTalk(AldiTalk):
         if result.get("error") and method.lower() == "get":
             raise SessionDead(f"Portal read failed on {path}.")
         if result.get("error"):
-            raise RuntimeError(f"Portal request failed on {path}.")
+            raise TransientPortalError(
+                f"Portal request failed on {path} (transient)."
+            )
         status = int(result.get("status", 0))
         final_url = result.get("url", "")
         content_type = result.get("contentType", "")
@@ -1051,6 +1196,10 @@ class ChromeAldiTalk(AldiTalk):
             or "/signin" in final_url
         ):
             raise SessionDead(f"HTTP {status} on {path}")
+        if status == 429 or 500 <= status < 600:
+            raise TransientPortalError(
+                f"Portal returned HTTP {status} on {path} (transient)."
+            )
         if not 200 <= status < 300:
             raise RuntimeError(f"Portal returned HTTP {status} on {path}.")
         if "text/html" in content_type:
@@ -1062,7 +1211,9 @@ class ChromeAldiTalk(AldiTalk):
         try:
             return json.loads(result.get("text", ""))
         except (TypeError, ValueError) as exc:
-            raise RuntimeError(f"Portal returned invalid JSON on {path}") from exc
+            raise TransientPortalError(
+                f"Portal returned invalid JSON on {path} (transient)."
+            ) from exc
 
     def _portal_post_status(self, path, body):
         return self._browser_request("post", path, body=body)["status"]
@@ -1125,11 +1276,41 @@ class ChromeAldiTalk(AldiTalk):
             self.login()
             try:
                 return self.get_offer_snapshot()
+            except TransientPortalError as exc:
+                print(f"Transient portal error ({exc}) - retrying once...")
+                time.sleep(5)
+                try:
+                    return self.get_offer_snapshot()
+                except Exception:
+                    self.close()
+                    raise
             except Exception:
                 self.close()
                 raise
         try:
             return self.get_offer_snapshot()
+        except TransientPortalError as exc:
+            print(f"Transient portal error ({exc}) - retrying once...")
+            time.sleep(5)
+            try:
+                return self.get_offer_snapshot()
+            except TransientPortalError as retry_exc:
+                print(
+                    f"Session check failed ({retry_exc}) - restarting Chrome "
+                    "and re-authenticating..."
+                )
+            except Exception as exc2:
+                print(
+                    f"Session check failed ({exc2}) - restarting Chrome "
+                    "and re-authenticating..."
+                )
+            self.close()
+            self.login()
+            try:
+                return self.get_offer_snapshot()
+            except Exception:
+                self.close()
+                raise
         except Exception as exc:
             print(
                 f"Session check failed ({exc}) - restarting Chrome and re-authenticating..."
@@ -1226,9 +1407,11 @@ def cmd_watch(cfg, client):
             _, offer, packs = client.ensure_session()
             rem = client.remaining_kb(packs)
             print(f"[{time.strftime('%F %T')}] {rem / KIB_PER_GB:.2f} GB remaining")
+            record_watch_success(rem)
             if client.refill_is_due(offer, packs):
                 print("At or below the refill threshold, booking...")
                 _, _, packs_after = client.book_one_gb()
+                record_watch_success(client.remaining_kb(packs_after))
                 if alerts and alerts["on_booking"]:
                     rem_after = client.remaining_kb(packs_after) / KIB_PER_GB
                     send_alert(
@@ -1239,6 +1422,7 @@ def cmd_watch(cfg, client):
                     )
             failures = 0
         except LoginRejected as e:
+            record_watch_error(f"login rejected: {e}")
             if alerts and alerts["on_failure"]:
                 send_alert(
                     alerts,
@@ -1247,6 +1431,7 @@ def cmd_watch(cfg, client):
                 )
             sys.exit(f"FATAL credentials rejected: {e}")
         except OtpRequired as e:
+            record_watch_error(f"OTP required: {e}")
             if alerts and alerts["on_failure"]:
                 send_alert(
                     alerts,
@@ -1257,6 +1442,7 @@ def cmd_watch(cfg, client):
             sys.exit(f"FATAL OTP automation stopped: {e}")
         except (SessionDead, RuntimeError, requests.RequestException, ValueError) as e:
             failures += 1
+            record_watch_error(str(e))
             wait = BACKOFF_STEPS[min(failures - 1, len(BACKOFF_STEPS) - 1)]
             print(f"[{time.strftime('%F %T')}] Error ({e}); backing off {wait}s")
             if (

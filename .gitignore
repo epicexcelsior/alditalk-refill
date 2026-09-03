@@ -2,6 +2,7 @@
 __pycache__/
 .ruff_cache/
 .watch.lock
+.watch-state.json
 .chrome-profile/
 config.json
 .gstack/

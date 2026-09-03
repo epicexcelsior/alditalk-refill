@@ -224,9 +224,9 @@ Start the watcher after desktop login:
 
 Each cycle loads the dashboard page once. The default interval is one hour plus jitter. This gives about 24 page loads per day.
 
-A read retry runs once when a page reload overlaps a read. An interrupted booking never retries at once. The next cycle reads the balance first.
+A read retry runs once when a page reload overlaps a read. A transient portal error (5xx/429/invalid JSON) retries once on the same session before any restart. An interrupted booking never retries at once. The next cycle reads the balance first.
 
-The watcher keeps Chrome open and restarts it after a dead session. It backs off after transient errors with growing waits. A rejected password stops the process.
+The watcher keeps Chrome open and restarts it after a dead session. It backs off after transient errors with growing waits. A rejected password stops the process. Each cycle writes `.watch-state.json` (balance, last cycle time, last error) so the watchdog heartbeat no longer depends on log text.
 
 ### Laptops
 
@@ -405,7 +405,7 @@ Run the automated tests:
 .venv/bin/python -m unittest -v
 ```
 
-25 tests cover login callbacks, offer selection, threshold boundaries, booking payloads, OTP handling, session expiry, email alerts, write safety, and the browser transport.
+46 tests cover login callbacks, offer selection, threshold boundaries, booking payloads, OTP handling, session expiry, transient retry, watch-state, email alerts, write safety, and the browser transport.
 
 The source HAR stays outside this repository. It contains account data.
 

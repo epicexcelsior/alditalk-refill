@@ -80,7 +80,7 @@ fi
 
 AGE=$(( $(date +%s) - $(stat -c %Y "$HEARTBEAT") ))
 if [ "$AGE" -gt "$MAX_AGE" ]; then
-    send_throttled_alert "silent_$((AGE / 3600))h" "watcher silent for $((AGE / 60)) minutes" \
+    send_throttled_alert "silent" "watcher silent for $((AGE / 60)) minutes" \
         "No heartbeat for $((AGE / 60)) minutes (limit $((MAX_AGE / 60))). The f5server watcher or its network path is down."
     exit 0
 fi
