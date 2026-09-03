@@ -36,6 +36,7 @@ BFF207 = "/scs/bff/scs-207-customer-master-data-bff/customer-master-data"
 BFF209 = "/scs/bff/scs-209-selfcare-dashboard-bff/selfcare-dashboard"
 
 KIB_PER_GB = 1048576
+BACKOFF_STEPS = (30, 60, 120, 300, 600, 900, 1800)
 RESEND_API_URL = "https://api.resend.com/emails"
 CONFIG_DIR = Path(__file__).parent.resolve()
 CONFIG_PATH = CONFIG_DIR / "config.json"
@@ -548,13 +549,16 @@ class AldiTalk:
 
     @staticmethod
     def _positive_offer_int(offer, field):
-        try:
-            value = int(offer[field])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RuntimeError(f"Offer has an invalid {field}.") from exc
-        if value <= 0:
+        value = offer.get(field)
+        if isinstance(value, bool):
             raise RuntimeError(f"Offer has an invalid {field}.")
-        return value
+        try:
+            val = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise RuntimeError(f"Offer has an invalid {field}.") from exc
+        if not val.is_finite() or val <= 0 or val != val.to_integral_value():
+            raise RuntimeError(f"Offer has an invalid {field}.")
+        return int(val)
 
     @classmethod
     def refill_is_due(cls, offer, packs):
@@ -577,14 +581,14 @@ class AldiTalk:
         missing = [field for field in required if not offer.get(field)]
         if missing:
             raise RuntimeError(f"Offer is missing refill fields: {', '.join(missing)}")
-        cls._positive_offer_int(offer, "onDemandAmountValueUid")
-        cls._positive_offer_int(offer, "refillThresholdValueUid")
+        amount = cls._positive_offer_int(offer, "onDemandAmountValueUid")
+        threshold = cls._positive_offer_int(offer, "refillThresholdValueUid")
         return {
             "offerId": str(offer["offerId"]),
             "subscriptionId": str(offer["subscriptionId"]),
             "updateOfferResourceID": str(offer["resourceId"]),
-            "amount": str(offer["onDemandAmountValueUid"]),
-            "refillThresholdValue": str(offer["refillThresholdValueUid"]),
+            "amount": str(amount),
+            "refillThresholdValue": str(threshold),
         }
 
     def _verify_refill(self, previous_remaining_kb, attempts=5, delay_seconds=2):
@@ -706,8 +710,8 @@ class AldiTalk:
             return self.get_offer_snapshot()
         try:
             return self.get_offer_snapshot()
-        except SessionDead:
-            print("Session dead - re-authenticating...")
+        except Exception as exc:
+            print(f"Session check failed ({exc}) - re-authenticating...")
             self.login()
             return self.get_offer_snapshot()
 
@@ -792,10 +796,21 @@ class ChromeAldiTalk(AldiTalk):
             sock.bind(("127.0.0.1", 0))
             return sock.getsockname()[1]
 
+    def _cleanup_stale_profile_locks(self):
+        if not self.chrome_profile_path.exists():
+            return
+        for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            target = self.chrome_profile_path / name
+            try:
+                if target.is_symlink() or target.exists():
+                    target.unlink()
+            except OSError:
+                pass
+
     def _start_browser(self):
         if self._page is not None and not self._page.is_closed():
             return
-        if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+        if not os.environ.get("DISPLAY"):
             raise RuntimeError(
                 "Browser mode requires a graphical desktop. DISPLAY is not set."
             )
@@ -826,14 +841,17 @@ class ChromeAldiTalk(AldiTalk):
             "about:blank",
         ]
         try:
-            self._chrome_process = subprocess.Popen(
-                args,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            self._cleanup_stale_profile_locks()
+            popen_kwargs = {
+                "stdin": subprocess.DEVNULL,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+            if os.name != "nt":
+                popen_kwargs["start_new_session"] = True
+            self._chrome_process = subprocess.Popen(args, **popen_kwargs)
             endpoint = f"http://127.0.0.1:{port}"
-            deadline = time.monotonic() + 20
+            deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 if self._chrome_process.poll() is not None:
                     raise RuntimeError("Chrome stopped during startup.")
@@ -888,71 +906,90 @@ class ChromeAldiTalk(AldiTalk):
             }"""
         )
 
-    def login(self):
+    def _login_flow(self):
         self._start_browser()
-        try:
-            self._page.goto(OVERVIEW_URL, wait_until="domcontentloaded", timeout=60_000)
-            if not self._authenticated_portal_url(self._page.url):
-                self._page.wait_for_selector(
-                    'input[autocomplete="username"]:visible', timeout=30_000
+        self._page.goto(OVERVIEW_URL, wait_until="domcontentloaded", timeout=60_000)
+        if not self._authenticated_portal_url(self._page.url):
+            self._page.wait_for_selector(
+                'input[autocomplete="username"]:visible', timeout=30_000
+            )
+            self._accept_cookie_dialog()
+            proof = self._page.locator(
+                'input[name*="proof" i], input[id*="proof" i]'
+            )
+            if proof.count():
+                self._page.wait_for_function(
+                    "element => Boolean(element && element.value)",
+                    arg=proof.first.element_handle(),
+                    timeout=10_000,
                 )
-                self._accept_cookie_dialog()
-                proof = self._page.locator(
-                    'input[name*="proof" i], input[id*="proof" i]'
-                )
-                if proof.count():
-                    self._page.wait_for_function(
-                        "element => Boolean(element && element.value)",
-                        arg=proof.first.element_handle(),
-                        timeout=10_000,
-                    )
-                self._page.locator(
-                    'input[autocomplete="username"]:visible'
-                ).fill(self.username)
-                self._page.locator(
-                    'input[autocomplete="current-password"]:visible'
-                ).fill(self.password)
-                buttons = self._page.locator("one-button:visible")
-                login_button = next(
-                    (
-                        buttons.nth(index)
-                        for index in range(buttons.count())
-                        if " ".join(buttons.nth(index).inner_text().split())
-                        == "Anmelden"
-                    ),
-                    None,
-                )
-                if login_button is None:
-                    raise RuntimeError("The login button is not available.")
-                # Usercentrics can cover the component after its consent action
-                # runs. Invoke ALDI's component handler without a pointer event.
-                login_button.evaluate("element => element.click()")
+            self._page.locator(
+                'input[autocomplete="username"]:visible'
+            ).fill(self.username)
+            self._page.locator(
+                'input[autocomplete="current-password"]:visible'
+            ).fill(self.password)
+            buttons = self._page.locator("one-button:visible")
+            login_button = next(
+                (
+                    buttons.nth(index)
+                    for index in range(buttons.count())
+                    if " ".join(buttons.nth(index).inner_text().split())
+                    == "Anmelden"
+                ),
+                None,
+            )
+            if login_button is None:
+                raise RuntimeError("The login button is not available.")
+            # Usercentrics can cover the component after its consent action
+            # runs. Invoke ALDI's component handler without a pointer event.
+            login_button.evaluate("element => element.click()")
 
-                deadline = time.monotonic() + 60
-                while time.monotonic() < deadline:
-                    if self._authenticated_portal_url(self._page.url):
-                        break
-                    failed = self._page.locator('[role="alert"]').filter(
-                        has_text="Anmeldung fehlgeschlagen"
-                    )
-                    if failed.count() and failed.first.is_visible():
-                        raise LoginRejected("The portal rejected the login.")
-                    if (
-                        self._chrome_process is not None
-                        and self._chrome_process.poll() is not None
-                    ):
-                        raise RuntimeError("Chrome stopped during login.")
-                    time.sleep(0.25)
-                else:
-                    raise RuntimeError("The browser login did not reach the portal.")
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                if self._authenticated_portal_url(self._page.url):
+                    break
+                failed = self._page.locator('[role="alert"]').filter(
+                    has_text="Anmeldung fehlgeschlagen"
+                )
+                if failed.count() and failed.first.is_visible():
+                    raise LoginRejected("The portal rejected the login.")
+                if (
+                    self._chrome_process is not None
+                    and self._chrome_process.poll() is not None
+                ):
+                    raise RuntimeError("Chrome stopped during login.")
+                time.sleep(0.25)
+            else:
+                raise RuntimeError("The browser login did not reach the portal.")
 
-            self._page.wait_for_load_state("domcontentloaded", timeout=30_000)
-            self.contract_id = self._get_contract_id()
-        except (LoginRejected, SessionDead):
-            raise
-        except Exception as exc:
-            raise RuntimeError("Browser login failed.") from exc
-        print("Logged in with headed Chrome.")
+        self._page.wait_for_load_state("domcontentloaded", timeout=30_000)
+        for attempt in range(3):
+            try:
+                self.contract_id = self._get_contract_id()
+                break
+            except Exception:
+                if attempt == 2:
+                    raise
+                time.sleep(1)
+
+    def login(self, max_attempts=2):
+        last_exc = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self.close()
+                self._login_flow()
+                print("Logged in with headed Chrome.")
+                return
+            except (LoginRejected, SessionDead):
+                self.close()
+                raise
+            except Exception as exc:
+                self.close()
+                last_exc = exc
+                if attempt < max_attempts:
+                    time.sleep(2)
+        raise RuntimeError(f"Browser login failed: {last_exc}") from last_exc
 
     def _browser_request(self, method, path, *, params=None, body=None):
         if self._page is None or self._page.is_closed():
@@ -1086,14 +1123,24 @@ class ChromeAldiTalk(AldiTalk):
     def ensure_session(self):
         if self._page is None or self._page.is_closed() or self.contract_id is None:
             self.login()
-            return self.get_offer_snapshot()
+            try:
+                return self.get_offer_snapshot()
+            except Exception:
+                self.close()
+                raise
         try:
             return self.get_offer_snapshot()
-        except SessionDead:
-            print("Session dead - restarting Chrome and re-authenticating...")
+        except Exception as exc:
+            print(
+                f"Session check failed ({exc}) - restarting Chrome and re-authenticating..."
+            )
             self.close()
             self.login()
-            return self.get_offer_snapshot()
+            try:
+                return self.get_offer_snapshot()
+            except Exception:
+                self.close()
+                raise
 
     def close(self):
         browser, playwright, process = (
@@ -1118,12 +1165,29 @@ class ChromeAldiTalk(AldiTalk):
             except Exception:
                 pass
         if process is not None and process.poll() is None:
-            process.terminate()
             try:
-                process.wait(timeout=5)
+                if os.name != "nt" and hasattr(os, "killpg"):
+                    pgid = os.getpgid(process.pid)
+                    os.killpg(pgid, signal.SIGTERM)
+                else:
+                    process.terminate()
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                process.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+                try:
+                    if os.name != "nt" and hasattr(os, "killpg"):
+                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    else:
+                        process.kill()
+                except (ProcessLookupError, OSError):
+                    pass
+                try:
+                    process.wait(timeout=2)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+        self._cleanup_stale_profile_locks()
 
 
 def cmd_check(client):
@@ -1193,7 +1257,7 @@ def cmd_watch(cfg, client):
             sys.exit(f"FATAL OTP automation stopped: {e}")
         except (SessionDead, RuntimeError, requests.RequestException, ValueError) as e:
             failures += 1
-            wait = min(1800, interval * (2 ** min(failures - 1, 4)))
+            wait = BACKOFF_STEPS[min(failures - 1, len(BACKOFF_STEPS) - 1)]
             print(f"[{time.strftime('%F %T')}] Error ({e}); backing off {wait}s")
             if (
                 alerts

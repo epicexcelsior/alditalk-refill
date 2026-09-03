@@ -81,7 +81,8 @@ Reboot persistence requires `loginctl show-user <user> | grep Linger=yes`.
 
 | Symptom | Meaning | Action |
 | --- | --- | --- |
-| `Session dead - restarting Chrome` | Normal self-heal | None |
+| `Session dead - restarting Chrome` | Normal self-heal on 401/403/redirect | None |
+| `Session check failed (...) - restarting Chrome` | Auto-recovery on 5xx / portal response error | None |
 | `FATAL OTP automation stopped` | Risk engine wants SMS | User logs in via real browser once; restart |
 | `FATAL credentials rejected` | Bad password | User updates config; restart |
 | Booking verified failure | Not applied | Check portal manually; report; no retry |
@@ -93,7 +94,7 @@ Reboot persistence requires `loginctl show-user <user> | grep Linger=yes`.
 A second always-on host ("witness", currently the music cloud VPS) watches the writer:
 
 - Writer pushes an hourly heartbeat (`scripts/watchdog_heartbeat.sh`, unit `alditalk-watchdog-push.*`) over SSH to `epic@100.119.115.55:~/watchdog/heartbeat.json`. Payload: service active, remaining GB, minutes since last cycle, bookings today. Push key: `~/.ssh/watchdog_push_ed25519`.
-- Witness runs hourly (`scripts/watchdog_check.sh`, units `alditalk-watchdog-check.*` in `~/watchdog/`) and emails via Resend when:
+- Witness runs hourly (`scripts/watchdog_check.sh`, units `alditalk-watchdog-check.*` in `~/watchdog/`) with alert throttling (3-hour duplicate cooldown) and recovery notifications, and emails via Resend when:
   - heartbeat older than 90 min (server or network down)
   - heartbeat says service inactive
   - last balance read older than 100 min (Chrome/login stuck)

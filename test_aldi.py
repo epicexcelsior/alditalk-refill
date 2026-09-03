@@ -447,6 +447,120 @@ class AldiTalkTests(unittest.TestCase):
             client._portal_post_json("/live", {"value": "one"})
         self.assertEqual(len(client._page.calls), 1)
 
+    def test_positive_offer_int_accepts_scientific_notation(self):
+        self.assertEqual(
+            aldi.AldiTalk._positive_offer_int({"field": "1.048576E6"}, "field"),
+            1_048_576,
+        )
+        self.assertEqual(
+            aldi.AldiTalk._positive_offer_int({"field": "2097152"}, "field"),
+            2_097_152,
+        )
+        for bad in (True, False, 0, -1, "-10", "abc", "100.5", "NaN"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(RuntimeError):
+                    aldi.AldiTalk._positive_offer_int({"field": bad}, "field")
+
+    def test_refill_payload_normalizes_scientific_notation(self):
+        live_offer = offer(
+            onDemandAmountValueUid="2.097152E6",
+            refillThresholdValueUid="1.048576E6",
+        )
+        payload = aldi.AldiTalk._refill_payload(live_offer)
+        self.assertEqual(payload["amount"], "2097152")
+        self.assertEqual(payload["refillThresholdValue"], "1048576")
+
+    def test_chrome_ensure_session_recovers_on_runtime_error(self):
+        client = aldi.ChromeAldiTalk("user", "password")
+        client._page = FakeBrowserPage({"status": 200})
+        client.contract_id = "test-contract"
+        live_offer = offer()
+
+        snapshots = [
+            RuntimeError("Portal returned HTTP 503 on /offers."),
+            ({}, live_offer, live_offer["pack"]),
+        ]
+
+        def fake_snapshot():
+            res = snapshots.pop(0)
+            if isinstance(res, Exception):
+                raise res
+            return res
+
+        client.get_offer_snapshot = fake_snapshot
+        client.close = Mock()
+        client.login = Mock()
+
+        with redirect_stdout(StringIO()):
+            payload, selected, packs = client.ensure_session()
+
+        client.close.assert_called_once()
+        client.login.assert_called_once()
+        self.assertEqual(selected["offerId"], "offer-live")
+
+    def test_chrome_ensure_session_closes_on_double_failure(self):
+        client = aldi.ChromeAldiTalk("user", "password")
+        client._page = FakeBrowserPage({"status": 200})
+        client.contract_id = "test-contract"
+
+        client.get_offer_snapshot = Mock(
+            side_effect=RuntimeError("Portal returned HTTP 503 on /offers.")
+        )
+        client.close = Mock()
+        client.login = Mock()
+
+        with (
+            redirect_stdout(StringIO()),
+            self.assertRaisesRegex(RuntimeError, "HTTP 503"),
+        ):
+            client.ensure_session()
+
+        self.assertEqual(client.close.call_count, 2)
+        client.login.assert_called_once()
+
+    def test_chrome_cleanup_stale_profile_locks(self):
+        with TemporaryDirectory() as tmp:
+            profile_dir = Path(tmp) / ".chrome-profile"
+            profile_dir.mkdir()
+            lock = profile_dir / "SingletonLock"
+            lock.symlink_to("f5server-12345")
+            cookie = profile_dir / "SingletonCookie"
+            cookie.symlink_to("123456789")
+            socket_file = profile_dir / "SingletonSocket"
+            socket_file.symlink_to("/tmp/sock")
+
+            client = aldi.ChromeAldiTalk(
+                "user", "password", chrome_profile_path=profile_dir
+            )
+            client._cleanup_stale_profile_locks()
+
+            self.assertFalse(lock.is_symlink())
+            self.assertFalse(cookie.is_symlink())
+            self.assertFalse(socket_file.is_symlink())
+
+    def test_cmd_watch_uses_progressive_backoff(self):
+        client = self.make_client()
+        client.ensure_session = Mock(side_effect=RuntimeError("portal down"))
+        cfg = {"watch_interval_seconds": 3600, "jitter_fraction": 0.2}
+
+        sleep_calls = []
+
+        def fake_sleep(dur):
+            sleep_calls.append(dur)
+            if len(sleep_calls) >= 5:
+                raise KeyboardInterrupt
+
+        with (
+            patch.object(aldi.time, "sleep", side_effect=fake_sleep),
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                aldi.cmd_watch(cfg, client)
+            except KeyboardInterrupt:
+                pass
+
+        self.assertEqual(sleep_calls, [30, 60, 120, 300, 600])
+
 
 class AlertsTest(unittest.TestCase):
     ALERTS = {
