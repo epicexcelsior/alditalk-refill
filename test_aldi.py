@@ -168,7 +168,10 @@ class AldiTalkTests(unittest.TestCase):
         )
         client._verify_refill = lambda previous: ({}, live_offer, live_offer["pack"])
 
-        with redirect_stdout(StringIO()):
+        with (
+            patch.object(aldi, "record_booking"),
+            redirect_stdout(StringIO()),
+        ):
             client.book_one_gb()
 
         _, request = client.session.post_calls[0]
@@ -231,7 +234,10 @@ class AldiTalkTests(unittest.TestCase):
         )
         client.session.cookies["user_id"] = "user-id"
 
-        with redirect_stdout(StringIO()):
+        with (
+            patch.object(aldi, "record_booking"),
+            redirect_stdout(StringIO()),
+        ):
             client.book_one_gb()
 
         self.assertEqual(len(client.session.post_calls), 3)
@@ -717,6 +723,38 @@ class AldiTalkTests(unittest.TestCase):
                 aldi.load_config()
             self.assertEqual(aldi.CONFIG_DIR, Path(tmp).resolve())
             self.assertEqual(aldi.STATE_PATH, (Path(tmp) / ".watch-state.json").resolve())
+
+    def test_booking_log_appends_each_verified_refill(self):
+        with TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            cfg_path.write_text(json.dumps({"username": "0123", "password": "pw"}))
+            cfg_path.chmod(0o600)
+            with patch.dict(aldi.os.environ, {"ALDITALK_CONFIG_DIR": tmp}):
+                aldi.load_config()
+            self.assertEqual(
+                aldi.BOOKINGS_PATH, (Path(tmp) / ".watch-bookings.log").resolve()
+            )
+            with redirect_stdout(StringIO()):
+                aldi.record_booking(2_097_152, 5_242_880)
+                aldi.record_booking(1_048_576, 6_291_456)
+            lines = aldi.BOOKINGS_PATH.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertIn("booked=2 GB", lines[0])
+            self.assertIn("remaining=5.00 GB", lines[0])
+            self.assertIn("booked=1 GB", lines[1])
+            self.assertIn("remaining=6.00 GB", lines[1])
+
+    def test_booking_log_failure_never_raises(self):
+        with TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.json"
+            cfg_path.write_text(json.dumps({"username": "0123", "password": "pw"}))
+            cfg_path.chmod(0o600)
+            with patch.dict(aldi.os.environ, {"ALDITALK_CONFIG_DIR": tmp}):
+                aldi.load_config()
+            (Path(tmp) / ".watch-bookings.log").mkdir()
+            with redirect_stdout(StringIO()) as out:
+                aldi.record_booking(1_048_576, 2_097_152)
+            self.assertIn("Booking log write failed", out.getvalue())
 
 
 class AlertsTest(unittest.TestCase):

@@ -42,6 +42,7 @@ CONFIG_DIR = Path(__file__).parent.resolve()
 CONFIG_PATH = CONFIG_DIR / "config.json"
 LOCK_PATH = CONFIG_DIR / ".watch.lock"
 STATE_PATH = CONFIG_DIR / ".watch-state.json"
+BOOKINGS_PATH = CONFIG_DIR / ".watch-bookings.log"
 DEFAULT_CHROME_PROFILE_PATH = Path(__file__).parent / ".chrome-profile"
 JITTER_RANDOM = secrets.SystemRandom()
 
@@ -68,13 +69,14 @@ class OtpRequired(RuntimeError):
 
 
 def load_config():
-    global CONFIG_DIR, CONFIG_PATH, LOCK_PATH, STATE_PATH
+    global CONFIG_DIR, CONFIG_PATH, LOCK_PATH, STATE_PATH, BOOKINGS_PATH
     CONFIG_DIR = Path(
         os.environ.get("ALDITALK_CONFIG_DIR", Path(__file__).parent)
     ).resolve()
     CONFIG_PATH = CONFIG_DIR / "config.json"
     LOCK_PATH = CONFIG_DIR / ".watch.lock"
     STATE_PATH = CONFIG_DIR / ".watch-state.json"
+    BOOKINGS_PATH = CONFIG_DIR / ".watch-bookings.log"
     try:
         cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -289,6 +291,23 @@ def record_watch_success(remaining_kb_value):
 
 def record_watch_error(message):
     write_watch_state(last_error=str(message)[:300])
+
+
+def record_booking(amount_kb, remaining_kb_value):
+    """Append one verified refill to a durable booking log.
+
+    The journal only keeps days of history, so this file is the permanent
+    record of bookings. Failures here must never break the booking itself.
+    """
+    try:
+        line = (
+            f"{time.strftime('%F %T')} booked={amount_kb / KIB_PER_GB:g} GB "
+            f"remaining={remaining_kb_value / KIB_PER_GB:.2f} GB\n"
+        )
+        with open(BOOKINGS_PATH, "a", encoding="utf-8") as handle:
+            handle.write(line)
+    except OSError as exc:
+        print(f"Booking log write failed: {exc}")
 
 
 def acquire_watch_lock():
@@ -791,6 +810,7 @@ class AldiTalk:
         self._portal_post_json(f"{BFF209}/v1/offer/updateUnlimited", payload)
         snapshot = self._verify_refill(previous_remaining)
         amount_kb = self._positive_offer_int(offer, "onDemandAmountValueUid")
+        record_booking(amount_kb, self.remaining_kb(snapshot[2]))
         print(f"Booked {amount_kb / KIB_PER_GB:g} GB and verified the new balance.")
         return snapshot
 
