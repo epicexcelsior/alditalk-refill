@@ -8,8 +8,9 @@ Type=simple
 WorkingDirectory=%h/alditalk-accounts/%i
 Environment=ALDITALK_CONFIG_DIR=%h/alditalk-accounts/%i
 Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-%h/.alditalk/resend.env
 UMask=0077
-ExecStart=%h/alditalk-refill/.venv/bin/python %h/alditalk-refill/aldi.py watch
+ExecStart=/usr/bin/xvfb-run -a --server-args="-screen 0 1280x900x24" %h/alditalk-refill/.venv/bin/python %h/alditalk-refill/aldi.py watch
 KillMode=mixed
 TimeoutStopSec=20
 Restart=on-failure
