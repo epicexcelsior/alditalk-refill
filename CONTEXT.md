@@ -111,17 +111,21 @@ Test procedure: backdate the heartbeat (`touch -d "3 hours ago"`) and start the 
 One server can host a few accounts. `ALDITALK_CONFIG_DIR` moves config, lock, and default Chrome profile into a per-account directory, so instances stay isolated.
 
 ```bash
-scripts/account.sh add <name>     # scaffold ~/alditalk-accounts/<name>, staggered interval
-scripts/account.sh list
-scripts/account.sh remove <name>  # stop + archive
+scripts/account.sh add <name>         # prompt for creds/alerts, validate, check, start
+scripts/account.sh configure <name>   # re-prompt, validate, restart
+scripts/account.sh check <name>       # read-only check; instance must be stopped
+scripts/account.sh list               # state table (active, remaining, last cycle)
+scripts/account.sh remove <name>      # stop + archive
 ```
 
 Mechanics:
 
-- Template unit: `systemd/alditalk-refill@.service`, instance name = folder name. Shares the repo venv.
+- No manual file editing: `add`/`configure` prompt on stdin (hidden password on a tty), inherit `alerts.resend_api_key`/`from` from the main `config.json`, write atomically with chmod 600, validate through the real loader, and run a read-only `check` before (re)starting. A failed check leaves the account stopped instead of crash-looping. Flags: `--no-check`, `--no-start`. `ALDITALK_ACCOUNTS_DIR` overrides `~/alditalk-accounts` for sandbox testing only; the unit template hardcodes the default path, so starting from an override dir is refused.
+- Template unit: `systemd/alditalk-refill@.service`, instance name = folder name. Shares the repo venv. Runs under `xvfb-run` and loads `EnvironmentFile=-%h/.alditalk/resend.env` for the alert key, same as the server unit.
 - Interval offset: base 3600 s plus a name checksum (0-899 s), so accounts never poll in sync.
-- Update script restarts every active `alditalk-refill@*` instance after pulling.
+- Update script restarts every active `alditalk-refill@*` instance after pulling (`daemon-reload` runs first).
 - Alert routing: set each account's own `alerts.to`; one shared Resend key is fine.
+- Booking history: each verified refill appends to `.watch-bookings.log` in the config dir (repo dir for the main account, account dir for instances). The journal rotates away after days; this file is permanent. Gitignored.
 
 Limits and risks. Keep the total at five or fewer:
 

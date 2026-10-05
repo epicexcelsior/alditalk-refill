@@ -79,7 +79,7 @@ Verified against the live portal:
 | 2026-08-24 | Session self-healing observed live: dead session, auto re-login |
 | 2026-08-24 | Email alert path verified through Resend |
 
-25 automated tests pass on every push (see CI badge in your repository).
+Automated tests run on every push (see the CI badge in your repository).
 
 ## Platform support
 
@@ -358,18 +358,19 @@ Use one project copy and one Chrome profile for your own account.
 
 For friends, each person runs a separate copy on their own computer. Credentials and sessions stay on their machine.
 
-You can also host a few accounts on one server. Each account gets its own directory, config, Chrome profile, and staggered schedule:
+You can also host a few accounts on one server. Each account gets its own directory, config, Chrome profile, and staggered schedule. The script prompts for everything, so nobody edits config files by hand:
 
 ```bash
-scripts/account.sh add mom        # scaffold, then fill mom's config.json
-systemctl --user enable --now alditalk-refill@mom.service
-scripts/account.sh list           # show all instances
+scripts/account.sh add mom        # prompts for her number, password, alert email
+scripts/account.sh list           # show all instances and their state
+scripts/account.sh configure mom  # change her credentials or alert email later
+scripts/account.sh check mom      # read-only check (stop her instance first)
 scripts/account.sh remove mom     # stop and archive
 ```
 
-See CONTEXT.md "Multi-account hosting" before you do this. Understand the shared-IP risk and credential custody. Keep the total small.
+`add` and `configure` validate the config through the real loader, run a read-only `check`, and only then (re)start the instance; a failed check leaves the account stopped instead of crash-looping. `--no-check` skips the live portal check and `--no-start` skips enabling the unit.
 
-## Instructions for AI agents
+See CONTEXT.md "Multi-account hosting" before you do this. Understand the shared-IP risk and credential custody. Keep the total small.
 
 ## Instructions for AI agents
 
@@ -405,7 +406,7 @@ Run the automated tests:
 .venv/bin/python -m unittest -v
 ```
 
-46 tests cover login callbacks, offer selection, threshold boundaries, booking payloads, OTP handling, session expiry, transient retry, watch-state, email alerts, write safety, and the browser transport.
+48 tests cover login callbacks, offer selection, threshold boundaries, booking payloads, OTP handling, session expiry, transient retry, watch-state and booking logs, email alerts, write safety, and the browser transport.
 
 The source HAR stays outside this repository. It contains account data.
 
