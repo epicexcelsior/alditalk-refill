@@ -13,6 +13,15 @@
 # path, so starting from an override directory is refused.
 set -eu
 
+# systemctl --user needs the session bus. Shells started without a desktop
+# session (snap/Orca terminals, plain ssh) often leave XDG_RUNTIME_DIR unset,
+# so every systemctl call fails with "Connection refused" and set -eu aborts
+# the script. Point it at this user's runtime dir when systemd created one.
+if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
+    XDG_RUNTIME_DIR="/run/user/$(id -u)"
+    export XDG_RUNTIME_DIR
+fi
+
 cd "$(dirname "$0")/.."
 REPO="$PWD"
 ACCOUNTS="${ALDITALK_ACCOUNTS_DIR:-$HOME/alditalk-accounts}"
