@@ -37,6 +37,7 @@ BFF209 = "/scs/bff/scs-209-selfcare-dashboard-bff/selfcare-dashboard"
 
 KIB_PER_GB = 1048576
 BACKOFF_STEPS = (30, 60, 120, 300, 600, 900, 1800)
+FIRST_CYCLE_SPREAD_SECONDS = 180
 RESEND_API_URL = "https://api.resend.com/emails"
 CONFIG_DIR = Path(__file__).parent.resolve()
 CONFIG_PATH = CONFIG_DIR / "config.json"
@@ -1434,6 +1435,15 @@ def cmd_book(client):
     print(f"Remaining after booking:  {client.remaining_kb(packs) / KIB_PER_GB:.2f} GB")
 
 
+def spread_first_cycle():
+    """Wait a random 0-FIRST_CYCLE_SPREAD_SECONDS before the first cycle.
+
+    A reboot or the daily self-update starts every watcher within the same
+    second. The delay keeps their portal logins apart as accounts are added.
+    """
+    time.sleep(JITTER_RANDOM.uniform(0, FIRST_CYCLE_SPREAD_SECONDS))
+
+
 def cmd_watch(cfg, client):
     interval = int(cfg.get("watch_interval_seconds", 3600))
     jitter = float(cfg.get("jitter_fraction", 0.2))
@@ -1541,6 +1551,8 @@ def main():
         if cfg["transport"] == "browser" or sys.argv[1] in ("book", "watch")
         else None
     )
+    if sys.argv[1] == "watch":
+        spread_first_cycle()
     try:
         {
             "check": lambda: cmd_check(client),

@@ -294,6 +294,47 @@ class AldiTalkTests(unittest.TestCase):
 
         sleep.assert_not_called()
 
+    def test_watch_spread_bounds_the_first_cycle_delay(self):
+        for drawn in (0.0, 0.5, 1.0):
+            with self.subTest(drawn=drawn):
+                with (
+                    patch.object(aldi, "JITTER_RANDOM") as random_source,
+                    patch.object(aldi.time, "sleep") as sleep,
+                ):
+                    random_source.uniform.return_value = drawn
+                    aldi.spread_first_cycle()
+                random_source.uniform.assert_called_once_with(
+                    0, aldi.FIRST_CYCLE_SPREAD_SECONDS
+                )
+                sleep.assert_called_once_with(drawn)
+
+    def test_only_the_watch_command_spreads_its_first_cycle(self):
+        cfg = {
+            "otp_command": None,
+            "otp_timeout_seconds": 120,
+            "transport": "browser",
+            "username": "01770000000",
+            "password": "secret",
+            "chrome_path": None,
+            "chrome_profile_path": "/tmp/profile-test",
+            "watch_interval_seconds": 3600,
+            "jitter_fraction": 0.2,
+            "alerts": None,
+        }
+        for command, expected in (("watch", True), ("check", False)):
+            with self.subTest(command=command):
+                with (
+                    patch.object(aldi, "load_config", return_value=cfg),
+                    patch.object(aldi, "ChromeAldiTalk"),
+                    patch.object(aldi, "acquire_watch_lock"),
+                    patch.object(aldi, "spread_first_cycle") as spread,
+                    patch.object(aldi, "cmd_watch"),
+                    patch.object(aldi, "cmd_check"),
+                    patch.object(aldi.sys, "argv", ["aldi.py", command]),
+                ):
+                    aldi.main()
+                self.assertEqual(spread.called, expected)
+
     def test_refill_is_due_at_the_exact_live_threshold(self):
         live_offer = offer(refillThresholdValueUid="1048576")
         packs = [data_pack(allocated=2_000_000, used=951_424)]

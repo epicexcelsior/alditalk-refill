@@ -144,6 +144,25 @@ Consent checklist per person before adding them:
 - They know which email receives alerts.
 - They have a way to reach you when their watcher stops.
 
+## Cadence
+
+What keeps a few accounts from looking like one machine on a metronome:
+
+- Interval: base 3600 s plus a name checksum (0-899 s), so accounts do not share a period.
+- Every cycle re-sleeps with `±jitter_fraction` (default 0.2) drawn from `secrets.SystemRandom`, so no period repeats exactly.
+- `watch` waits a random 0-180 s (`FIRST_CYCLE_SPREAD_SECONDS`) before its first cycle, so a reboot or the daily self-update does not start every portal login in the same second. A fresh account prints its first balance line up to 3 minutes after start.
+- Failures back off through `BACKOFF_STEPS` (30 s to 30 min). A failed read retries once. The first SMS prompt stops the run.
+
+ALDI's portal session lasts less than a watch interval, so most cycles log
+`HTTP 401 ... restarting Chrome and re-authenticating` and perform one login.
+That is the portal's session lifetime, not a failure. Expect roughly one login
+per cycle per account.
+
+The schedule is the only tunable in this area. Do not add fingerprint spoofing,
+webdriver hiding, pointer emulation, or any other bot-check bypass: the
+headed-Chrome session already passes ALDI's risk engine, and bypassing its
+checks is forbidden under "Guardrails" below.
+
 ## Guardrails
 
 - Never commit/print/transmit `config.json` or `.chrome-profile` (live credentials).
