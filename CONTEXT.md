@@ -11,6 +11,7 @@ This is an unofficial tool that may violate ALDI TALK's terms; account-level con
 - Runtime: systemd user unit `alditalk-refill-server.service` (Xvfb-wrapped), Linger on
 - Self-update: timer daily 06:00 Berlin ±30 min; test-gated; resets to origin/main
 - Resend key `~/.alditalk/resend.env` via drop-in; sender `alerts@mail.epicexcelsior.com`
+- Host OOM recovery: systemd-oomd SIGKILLs units under `user@1000.service` when cgroup pressure exceeds 50% for 20 s. `/etc/systemd/system/user@1000.service.d/20-restart-on-failure.conf` restarts the user manager after 30 s, and `/usr/local/sbin/f5-recovery` restarts it within 60 s if that path fails.
 
 ## Why headed Chrome
 
@@ -90,6 +91,8 @@ Reboot persistence requires `loginctl show-user <user> | grep Linger=yes`.
 | Chrome crashes | Display/RAM problem | Check Xvfb, memory |
 | Update git error 128 | Deploy key broken | Recreate key, reset `core.sshCommand` |
 | Update tests fail | Bad upstream commit | `update.sh` rolls back to previous HEAD automatically |
+| `systemd-oomd killed N process(es)` in this unit | Host memory pressure; systemd-oomd SIGKILLs the unit | None; systemd restarts it after 60 s. If it repeats for hours, fix host memory and swap. |
+| Every user unit dead, `systemctl --user` returns `Connection refused` | systemd-oomd killed `user@1000.service`, which ships `Restart=no` | The drop-in restarts it in 30 s. `f5-recovery` restarts it within 60 s. |
 
 ## Watchdog (dead man's switch)
 
@@ -98,6 +101,8 @@ A second always-on host ("witness", currently the music cloud VPS) watches the w
 - Writer pushes an hourly heartbeat (`scripts/watchdog_heartbeat.sh`, unit `alditalk-watchdog-push.*`) over SSH to `epic@100.119.115.55:~/watchdog/heartbeat.json`. Payload: service active, remaining GB, minutes since last cycle, bookings today. Push key: `~/.ssh/watchdog_push_ed25519`.
 - The watcher writes `.watch-state.json` in `CONFIG_DIR` each cycle (remaining GB, last cycle time, last error). The heartbeat prefers this file and falls back to journal parsing only when the file is missing or older than 2 h, so log-format changes no longer break monitoring. Override with `WATCH_STATE_FILE`.
 - Witness runs hourly (`scripts/watchdog_check.sh`, units `alditalk-watchdog-check.*` in `~/watchdog/`) with alert throttling (3-hour duplicate cooldown, stable `silent` key) and recovery notifications, and emails via Resend when:
+- The witness copy in `~/watchdog/scripts/watchdog_check.sh` is a deployment, not a checkout. Re-deploy it after you change this file. A stale copy sent one email per hour through the 2026-10-06 outage because it predates throttling.
+- The witness needs `loginctl enable-linger epic`, or the hourly timer never starts after a reboot.
   - heartbeat older than 90 min (server or network down)
   - heartbeat says service inactive
   - last balance read older than 100 min (Chrome/login stuck)
