@@ -229,6 +229,7 @@ LIST_PY=$(cat <<'PY'
 import json, os, subprocess, sys, time
 
 accounts = sys.argv[1]
+repo = sys.argv[2] if len(sys.argv) > 2 else None
 entries = []
 archived = 0
 if os.path.isdir(accounts):
@@ -238,48 +239,51 @@ if os.path.isdir(accounts):
         elif os.path.isdir(os.path.join(accounts, name)):
             entries.append(name)
 
+rows = []
+if repo:
+    rows.append(("main", repo, "alditalk-refill-server.service"))
+for name in entries:
+    rows.append((name, os.path.join(accounts, name), "alditalk-refill@" + name + ".service"))
+
+print(f"{'ACCOUNT':<16} {'STATE':<9} {'REMAINING':>10} {'INTERVAL':>9}  LAST CYCLE")
+for name, path, unit in rows:
+    cfg, state = {}, {}
+    try:
+        with open(os.path.join(path, "config.json"), encoding="utf-8") as handle:
+            cfg = json.load(handle)
+    except (OSError, ValueError):
+        pass
+    try:
+        with open(os.path.join(path, ".watch-state.json"), encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        pass
+    try:
+        active = (
+            subprocess.run(
+                ["systemctl", "--user", "is-active", unit],
+                capture_output=True,
+            ).returncode
+            == 0
+        )
+    except OSError:
+        active = False
+    remaining = state.get("remaining_gb")
+    remaining_s = f"{remaining:g} GB" if isinstance(remaining, (int, float)) else "-"
+    interval = cfg.get("watch_interval_seconds", "?")
+    interval_s = str(interval) + "s" if isinstance(interval, int) else str(interval)
+    last = state.get("last_cycle_ts")
+    if isinstance(last, (int, float)):
+        minutes = max(0.0, (time.time() - last) / 60)
+        last_s = f"{minutes:.0f} min ago" if minutes < 120 else f"{minutes / 60:.1f} h ago"
+    else:
+        last_s = "-"
+    print(
+        f"{name:<16} {'active' if active else 'inactive':<9} "
+        f"{remaining_s:>10} {interval_s:>9}  {last_s}"
+    )
 if not entries:
     print("No accounts under " + accounts + ".")
-else:
-    print(f"{'ACCOUNT':<16} {'STATE':<9} {'REMAINING':>10} {'INTERVAL':>9}  LAST CYCLE")
-    for name in entries:
-        path = os.path.join(accounts, name)
-        cfg, state = {}, {}
-        try:
-            with open(os.path.join(path, "config.json"), encoding="utf-8") as handle:
-                cfg = json.load(handle)
-        except (OSError, ValueError):
-            pass
-        try:
-            with open(os.path.join(path, ".watch-state.json"), encoding="utf-8") as handle:
-                state = json.load(handle)
-        except (OSError, ValueError):
-            pass
-        try:
-            active = (
-                subprocess.run(
-                    ["systemctl", "--user", "is-active",
-                     "alditalk-refill@" + name + ".service"],
-                    capture_output=True,
-                ).returncode
-                == 0
-            )
-        except OSError:
-            active = False
-        remaining = state.get("remaining_gb")
-        remaining_s = f"{remaining:g} GB" if isinstance(remaining, (int, float)) else "-"
-        interval = cfg.get("watch_interval_seconds", "?")
-        interval_s = str(interval) + "s" if isinstance(interval, int) else str(interval)
-        last = state.get("last_cycle_ts")
-        if isinstance(last, (int, float)):
-            minutes = max(0.0, (time.time() - last) / 60)
-            last_s = f"{minutes:.0f} min ago" if minutes < 120 else f"{minutes / 60:.1f} h ago"
-        else:
-            last_s = "-"
-        print(
-            f"{name:<16} {'active' if active else 'inactive':<9} "
-            f"{remaining_s:>10} {interval_s:>9}  {last_s}"
-        )
 if archived:
     print(f"{archived} archived (.removed-*) kept under {accounts}")
 PY
@@ -343,7 +347,7 @@ case "$CMD" in
         run_check "$ACCOUNTS/$NAME" || die "Read-only check failed for '$NAME'."
         ;;
     list)
-        "$REPO/.venv/bin/python" -c "$LIST_PY" "$ACCOUNTS"
+        "$REPO/.venv/bin/python" -c "$LIST_PY" "$ACCOUNTS" "$REPO"
         ;;
     remove)
         valid_name "$NAME" || die "Name must match [a-z0-9][a-z0-9_-]{0,31}."
