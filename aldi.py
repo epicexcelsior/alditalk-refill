@@ -640,6 +640,20 @@ class AldiTalk:
             raise RuntimeError("Data pack has invalid allocated or used values.")
         return int(kib)
 
+    @staticmethod
+    def _pack_kib_display(pack, field):
+        """Parse a pack field for display only. Roaming grants can be fractional KiB."""
+        value = pack.get(field)
+        if isinstance(value, bool):
+            return None
+        try:
+            kib = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        if not kib.is_finite() or kib < 0:
+            return None
+        return kib
+
     @classmethod
     def remaining_kb(cls, packs):
         standard = next(
@@ -1396,13 +1410,16 @@ def cmd_check(client):
     rem = client.remaining_kb(packs)
     print(f"Offer: {offer.get('offerName')}  status={offer.get('status')}")
     for p in packs:
-        a = client._pack_kib(p, "allocated")
-        u = client._pack_kib(p, "used")
         tag = (
             "roaming"
             if p.get("balanceAttributeReference") == "dataGrantAmountFUP"
             else "domestic"
         )
+        a = client._pack_kib_display(p, "allocated")
+        u = client._pack_kib_display(p, "used")
+        if a is None or u is None:
+            print(f"  [{tag}] n/a (portal value is not whole KiB)")
+            continue
         print(
             f"  [{tag}] left={(a - u) / KIB_PER_GB:.2f} GB of {a / KIB_PER_GB:.2f} GB"
         )

@@ -315,6 +315,46 @@ class AldiTalkTests(unittest.TestCase):
                         [data_pack(allocated=allocated, used=used)]
                     )
 
+    def test_cmd_check_survives_a_fractional_fup_pack(self):
+        domestic = data_pack(allocated="2.62144E7", used="2.223696E7")
+        domestic["balanceAttributeReference"] = "dataGrantAmount"
+        roaming = data_pack(allocated="1.60432128E7", used="0.0")
+        roaming["balanceAttributeReference"] = "dataGrantAmountFUP"
+        client = self.make_client()
+        client.ensure_session = lambda: (
+            {"totalBalance": "29.95"},
+            offer(offerName="Tarif S", pack=[domestic, roaming]),
+            [domestic, roaming],
+        )
+
+        out = StringIO()
+        with redirect_stdout(out):
+            aldi.cmd_check(client)
+
+        printed = out.getvalue()
+        self.assertIn("Offer: Tarif S  status=active", printed)
+        self.assertIn("[domestic] left=3.79 GB of 25.00 GB", printed)
+        self.assertIn("[roaming] left=15.30 GB of 15.30 GB", printed)
+        self.assertIn("Remaining (domestic): 3.79 GB", printed)
+
+    def test_cmd_check_marks_an_unreadable_pack_as_na(self):
+        domestic = data_pack(allocated="2.62144E7", used="2.223696E7")
+        roaming = data_pack(used="0.0")
+        roaming["allocated"] = None
+        roaming["balanceAttributeReference"] = "dataGrantAmountFUP"
+        client = self.make_client()
+        client.ensure_session = lambda: (
+            {"totalBalance": "29.95"},
+            offer(pack=[domestic, roaming]),
+            [domestic, roaming],
+        )
+
+        out = StringIO()
+        with redirect_stdout(out):
+            aldi.cmd_check(client)
+
+        self.assertIn("[roaming] n/a", out.getvalue())
+
     def test_refill_verification_rejects_an_unchanged_balance(self):
         client = self.make_client()
         unchanged = offer(pack=[data_pack(allocated=2_000_000, used=1_500_000)])
