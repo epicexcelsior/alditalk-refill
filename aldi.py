@@ -38,6 +38,8 @@ BFF209 = "/scs/bff/scs-209-selfcare-dashboard-bff/selfcare-dashboard"
 KIB_PER_GB = 1048576
 BACKOFF_STEPS = (30, 60, 120, 300, 600, 900, 1800)
 FIRST_CYCLE_SPREAD_SECONDS = 180
+FAILURE_ALERT_COOLDOWN_SECONDS = 6 * 3600
+_KEEP = object()
 RESEND_API_URL = "https://api.resend.com/emails"
 CONFIG_DIR = Path(__file__).parent.resolve()
 CONFIG_PATH = CONFIG_DIR / "config.json"
@@ -170,7 +172,7 @@ def load_config():
             "resend_api_key": api_key,
             "from": raw_alerts["from"],
             "to": raw_alerts["to"],
-            "on_booking": bool(raw_alerts.get("on_booking", True)),
+            "on_booking": bool(raw_alerts.get("on_booking", False)),
             "on_failure": bool(raw_alerts.get("on_failure", True)),
             "failure_threshold": failure_threshold,
         }
@@ -204,7 +206,18 @@ def load_config():
     cfg["chrome_path"] = chrome_path
     cfg["chrome_profile_path"] = chrome_profile_path
     cfg["alerts"] = alerts_cfg
+    cfg["account_name"] = account_label()
     return cfg
+
+
+def account_label():
+    """Name used in alert subjects and log lines for this config directory."""
+    override = os.environ.get("ALDITALK_ACCOUNT_NAME", "").strip()
+    if override:
+        return override
+    if CONFIG_DIR == Path(__file__).parent.resolve():
+        return "main"
+    return CONFIG_DIR.name
 
 
 def resolve_secret(value):
@@ -241,6 +254,40 @@ def send_alert(alerts_cfg, subject, body):
     return True
 
 
+def alert_subject(cfg, title):
+    return f"[ALDI TALK {cfg.get('account_name', 'main')}] {title}"
+
+
+def alert_header(cfg):
+    name = cfg.get("account_name", "main")
+    number = cfg.get("username", "unknown number")
+    return f"Account: {name} ({number})\n"
+
+
+def send_failure_alert(alerts_cfg, cfg, title, body):
+    """Send one failure alert, at most once per cooldown window.
+
+    A rejected password or a required SMS check exits the watcher, and systemd
+    restarts it every minute. Without the cooldown that loop emails every
+    minute until someone intervenes.
+    """
+    if not alerts_cfg or not alerts_cfg.get("on_failure"):
+        return False
+    now = time.time()
+    last = read_watch_state().get("last_failure_alert_ts")
+    if isinstance(last, (int, float)) and now - last < FAILURE_ALERT_COOLDOWN_SECONDS:
+        sent_ago = int((now - last) / 60)
+        print(
+            f"Failure alert suppressed: one was sent {sent_ago} min ago "
+            f"(cooldown {FAILURE_ALERT_COOLDOWN_SECONDS // 60} min)."
+        )
+        return False
+    sent = send_alert(alerts_cfg, alert_subject(cfg, title), alert_header(cfg) + body)
+    if sent:
+        write_watch_state(last_failure_alert_ts=int(now))
+    return sent
+
+
 def read_watch_state():
     """Return the last structured watcher state, or {} when unavailable."""
     try:
@@ -250,25 +297,36 @@ def read_watch_state():
     return data if isinstance(data, dict) else {}
 
 
-def write_watch_state(*, remaining_gb=None, last_cycle_ts=None, last_error=None):
+def write_watch_state(
+    *,
+    remaining_gb=_KEEP,
+    last_cycle_ts=_KEEP,
+    last_error=_KEEP,
+    eu_refill_stalled=_KEEP,
+    last_failure_alert_ts=_KEEP,
+):
     """Persist one watch-cycle outcome for the watchdog heartbeat.
 
     The heartbeat script prefers this file over parsing journal text, so a
-    log-format change can no longer break monitoring. Failures here must
-    never stop the watcher.
+    log-format change can no longer break monitoring. Omitted fields keep
+    their previous value. Failures here must never stop the watcher.
     """
     try:
         previous = read_watch_state()
         now = int(time.time())
-        if remaining_gb is None:
-            remaining_gb = previous.get("remaining_gb")
-        if last_cycle_ts is None:
-            last_cycle_ts = previous.get("last_cycle_ts")
+
+        def keep(value, key):
+            return previous.get(key) if value is _KEEP else value
+
         payload = {
             "ts": now,
-            "remaining_gb": remaining_gb,
-            "last_cycle_ts": last_cycle_ts,
-            "last_error": last_error,
+            "remaining_gb": keep(remaining_gb, "remaining_gb"),
+            "last_cycle_ts": keep(last_cycle_ts, "last_cycle_ts"),
+            "last_error": keep(last_error, "last_error"),
+            "eu_refill_stalled": bool(keep(eu_refill_stalled, "eu_refill_stalled")),
+            "last_failure_alert_ts": keep(
+                last_failure_alert_ts, "last_failure_alert_ts"
+            ),
         }
         tmp = STATE_PATH.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
@@ -282,11 +340,12 @@ def write_watch_state(*, remaining_gb=None, last_cycle_ts=None, last_error=None)
         print(f"Watch state write failed: {exc}")
 
 
-def record_watch_success(remaining_kb_value):
+def record_watch_success(remaining_kb_value, eu_refill_stalled=_KEEP):
     write_watch_state(
         remaining_gb=round(remaining_kb_value / KIB_PER_GB, 2),
         last_cycle_ts=int(time.time()),
         last_error=None,
+        eu_refill_stalled=eu_refill_stalled,
     )
 
 
@@ -671,6 +730,34 @@ class AldiTalk:
             raise RuntimeError(f"Unexpected data unit: {standard.get('unit')!r}")
         return cls._pack_kib(standard, "allocated") - cls._pack_kib(standard, "used")
 
+    @classmethod
+    def pack_remaining(cls, pack):
+        """Remaining KiB for one pack, as Decimal.
+
+        The EU roaming grant uses fractional KiB, so it cannot go through
+        _pack_kib. Returns None when a value cannot be read.
+        """
+        allocated = cls._pack_kib_display(pack, "allocated")
+        used = cls._pack_kib_display(pack, "used")
+        if allocated is None or used is None:
+            return None
+        return allocated - used
+
+    @classmethod
+    def eu_remaining_kb(cls, packs):
+        """Remaining KiB of the EU fair-use grant, or None when absent."""
+        roaming = next(
+            (
+                p
+                for p in packs
+                if p.get("balanceAttributeReference") == "dataGrantAmountFUP"
+            ),
+            None,
+        )
+        if roaming is None:
+            return None
+        return cls.pack_remaining(roaming)
+
     @staticmethod
     def _positive_offer_int(offer, field):
         value = offer.get(field)
@@ -685,13 +772,41 @@ class AldiTalk:
         return int(val)
 
     @classmethod
+    def _refill_applicable(cls, offer):
+        return (
+            offer.get("isOnDemandRefillApplicable") is True
+            and offer.get("status") == "active"
+        )
+
+    @classmethod
+    def _refill_threshold(cls, offer):
+        return cls._positive_offer_int(offer, "refillThresholdValueUid")
+
+    @classmethod
+    def domestic_is_due(cls, offer, packs):
+        """True when the German volume is at or below the refill threshold."""
+        if not cls._refill_applicable(offer):
+            return False
+        return cls.remaining_kb(packs) <= cls._refill_threshold(offer)
+
+    @classmethod
+    def eu_is_due(cls, offer, packs):
+        """True when the EU fair-use grant is at or below the refill threshold.
+
+        ALDI's EU volume is a fair-use cap. EU usage also drains the German
+        volume, which the refill restores, so this only fires when the cap
+        itself runs low while German volume is still plentiful.
+        """
+        if not cls._refill_applicable(offer):
+            return False
+        remaining = cls.eu_remaining_kb(packs)
+        if remaining is None:
+            return False
+        return remaining <= cls._refill_threshold(offer)
+
+    @classmethod
     def refill_is_due(cls, offer, packs):
-        if offer.get("isOnDemandRefillApplicable") is not True:
-            return False
-        if offer.get("status") != "active":
-            return False
-        threshold = cls._positive_offer_int(offer, "refillThresholdValueUid")
-        return cls.remaining_kb(packs) <= threshold
+        return cls.domestic_is_due(offer, packs) or cls.eu_is_due(offer, packs)
 
     @classmethod
     def _refill_payload(cls, offer):
@@ -1453,55 +1568,103 @@ def cmd_watch(cfg, client):
         try:
             _, offer, packs = client.ensure_session()
             rem = client.remaining_kb(packs)
-            print(f"[{time.strftime('%F %T')}] {rem / KIB_PER_GB:.2f} GB remaining")
+            eu = client.eu_remaining_kb(packs)
+            line = f"[{time.strftime('%F %T')}] {rem / KIB_PER_GB:.2f} GB remaining"
+            if eu is not None:
+                line += f" (EU: {float(eu) / KIB_PER_GB:.2f} GB)"
+            print(line)
             record_watch_success(rem)
-            if client.refill_is_due(offer, packs):
-                print("At or below the refill threshold, booking...")
+            stalled = bool(read_watch_state().get("eu_refill_stalled"))
+            domestic_due = client.domestic_is_due(offer, packs)
+            eu_due = client.eu_is_due(offer, packs)
+            if stalled and not eu_due:
+                stalled = False
+                write_watch_state(eu_refill_stalled=False)
+            if domestic_due or (eu_due and not stalled):
+                if eu_due and not domestic_due:
+                    print(
+                        "EU roaming volume at or below the refill threshold, booking..."
+                    )
+                else:
+                    print("At or below the refill threshold, booking...")
                 _, _, packs_after = client.book_one_gb()
-                record_watch_success(client.remaining_kb(packs_after))
+                rem_after = client.remaining_kb(packs_after)
+                eu_after = client.eu_remaining_kb(packs_after)
+                stalled_after = client.eu_is_due(
+                    offer, packs_after
+                ) and not client.domestic_is_due(offer, packs_after)
+                record_watch_success(rem_after, eu_refill_stalled=stalled_after)
                 if alerts and alerts["on_booking"]:
-                    rem_after = client.remaining_kb(packs_after) / KIB_PER_GB
+                    body = alert_header(cfg) + (
+                        f"Booked 1 GB at {time.strftime('%F %T')}.\n"
+                        f"German volume: {rem / KIB_PER_GB:.2f} -> "
+                        f"{rem_after / KIB_PER_GB:.2f} GB.\n"
+                    )
+                    if eu_after is not None:
+                        before = (
+                            f"{float(eu) / KIB_PER_GB:.2f} GB"
+                            if eu is not None
+                            else "n/a"
+                        )
+                        body += (
+                            f"EU roaming volume: {before} -> "
+                            f"{float(eu_after) / KIB_PER_GB:.2f} GB.\n"
+                        )
+                    send_alert(alerts, alert_subject(cfg, "refill booked"), body)
+                if stalled_after and not stalled and alerts and alerts["on_failure"]:
                     send_alert(
                         alerts,
-                        "ALDI TALK refill booked",
-                        f"Booked 1 GB at {time.strftime('%F %T')}. "
-                        f"Domestic balance is now about {rem_after:.2f} GB.",
+                        alert_subject(
+                            cfg, "EU roaming volume did not rise after a refill"
+                        ),
+                        alert_header(cfg)
+                        + f"A free 1 GB refill was booked at {time.strftime('%F %T')}, "
+                        f"but the EU volume stayed at "
+                        f"{float(eu_after) / KIB_PER_GB:.2f} GB.\n"
+                        "German volume refills still run. EU-only refills are off "
+                        "until the EU volume rises again.\n"
+                        "ALDI can charge a surcharge past the EU fair-use limit. "
+                        "Check the portal if you travel in the EU.\n",
                     )
             failures = 0
         except LoginRejected as e:
             record_watch_error(f"login rejected: {e}")
-            if alerts and alerts["on_failure"]:
-                send_alert(
-                    alerts,
-                    "ALDI TALK watcher stopped: login rejected",
-                    f"The watcher exited at {time.strftime('%F %T')}.\n{e}",
-                )
+            send_failure_alert(
+                alerts,
+                cfg,
+                "login rejected",
+                f"The watcher exited at {time.strftime('%F %T')}.\n{e}\n"
+                "Check username/password in config.json, then restart the service.\n",
+            )
             sys.exit(f"FATAL credentials rejected: {e}")
         except OtpRequired as e:
             record_watch_error(f"OTP required: {e}")
-            if alerts and alerts["on_failure"]:
-                send_alert(
-                    alerts,
-                    "ALDI TALK watcher stopped: SMS verification required",
-                    f"The watcher exited at {time.strftime('%F %T')}.\n{e}\n"
-                    "Log in once through the portal to clear it.",
-                )
+            send_failure_alert(
+                alerts,
+                cfg,
+                "SMS verification required",
+                f"The watcher stopped at {time.strftime('%F %T')}.\n{e}\n"
+                "Log in once through the portal on a phone or browser to clear it, "
+                "then restart the service.\n",
+            )
             sys.exit(f"FATAL OTP automation stopped: {e}")
         except (SessionDead, RuntimeError, requests.RequestException, ValueError) as e:
             failures += 1
             record_watch_error(str(e))
             wait = BACKOFF_STEPS[min(failures - 1, len(BACKOFF_STEPS) - 1)]
             print(f"[{time.strftime('%F %T')}] Error ({e}); backing off {wait}s")
-            if (
-                alerts
-                and alerts["on_failure"]
-                and failures == alerts["failure_threshold"]
-            ):
-                send_alert(
+            if alerts and failures == alerts["failure_threshold"]:
+                next_try = time.strftime(
+                    "%F %T", time.localtime(time.time() + wait)
+                )
+                send_failure_alert(
                     alerts,
-                    f"ALDI TALK watcher failing ({failures} consecutive cycles)",
+                    cfg,
+                    f"watcher failing ({failures} consecutive cycles)",
                     f"Last error at {time.strftime('%F %T')}:\n{e}\n"
-                    "The watcher keeps retrying with backoff.",
+                    f"Next attempt around {next_try}.\n"
+                    "The watcher keeps retrying with backoff. No action is needed "
+                    "unless this repeats.\n",
                 )
             time.sleep(wait)
             continue

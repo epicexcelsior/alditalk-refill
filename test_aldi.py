@@ -1,6 +1,8 @@
 import unittest
 import json
+import time
 from contextlib import redirect_stdout
+from decimal import Decimal
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -335,6 +337,36 @@ class AldiTalkTests(unittest.TestCase):
                     aldi.main()
                 self.assertEqual(spread.called, expected)
 
+    def test_pack_remaining_reads_the_fractional_eu_grant(self):
+        eu = data_pack(allocated="1.60432128E7", used="16040000.0")
+        eu["balanceAttributeReference"] = "dataGrantAmountFUP"
+        self.assertEqual(aldi.AldiTalk.pack_remaining(eu), Decimal("3212.8"))
+        self.assertEqual(
+            aldi.AldiTalk.eu_remaining_kb([data_pack(), eu]), Decimal("3212.8")
+        )
+        self.assertIsNone(
+            aldi.AldiTalk.pack_remaining({"type": "data", "unit": "kilobytes"})
+        )
+
+    def test_refill_is_due_when_only_the_eu_grant_is_low(self):
+        domestic = data_pack(allocated=25_000_000, used=1_000_000)
+        eu = data_pack(allocated="1.60432128E7", used="16040000.0")
+        eu["balanceAttributeReference"] = "dataGrantAmountFUP"
+        packs = [domestic, eu]
+
+        self.assertFalse(aldi.AldiTalk.domestic_is_due(offer(), packs))
+        self.assertTrue(aldi.AldiTalk.eu_is_due(offer(), packs))
+        self.assertTrue(aldi.AldiTalk.refill_is_due(offer(), packs))
+
+    def test_refill_is_not_due_while_both_grants_are_full(self):
+        domestic = data_pack(allocated=25_000_000, used=1_000_000)
+        eu = data_pack(allocated="1.60432128E7", used="0.0")
+        eu["balanceAttributeReference"] = "dataGrantAmountFUP"
+        packs = [domestic, eu]
+
+        self.assertFalse(aldi.AldiTalk.eu_is_due(offer(), packs))
+        self.assertFalse(aldi.AldiTalk.refill_is_due(offer(), packs))
+
     def test_refill_is_due_at_the_exact_live_threshold(self):
         live_offer = offer(refillThresholdValueUid="1048576")
         packs = [data_pack(allocated=2_000_000, used=951_424)]
@@ -444,6 +476,43 @@ class AldiTalkTests(unittest.TestCase):
         self.assertEqual(config["transport"], "browser")
         self.assertEqual(config["watch_interval_seconds"], 3600)
         self.assertEqual(config["chrome_profile_path"], aldi.DEFAULT_CHROME_PROFILE_PATH)
+
+    def test_config_names_the_account_and_stays_quiet_after_a_refill(self):
+        body = (
+            '{"username":"015100000000","password":"password","alerts":{'
+            '"resend_api_key":"re_test","from":"alerts@example.com",'
+            '"to":"owner@example.com"}}'
+        )
+        with TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(body, encoding="utf-8")
+            config_path.chmod(0o600)
+            with patch.dict(
+                aldi.os.environ,
+                {"ALDITALK_CONFIG_DIR": directory, "ALDITALK_ACCOUNT_NAME": "ethan"},
+            ):
+                named = aldi.load_config()
+            with patch.dict(
+                aldi.os.environ,
+                {"ALDITALK_CONFIG_DIR": directory, "ALDITALK_ACCOUNT_NAME": ""},
+            ):
+                derived = aldi.load_config()
+
+        self.assertFalse(named["alerts"]["on_booking"])
+        self.assertTrue(named["alerts"]["on_failure"])
+        self.assertEqual(named["account_name"], "ethan")
+        self.assertEqual(derived["account_name"], Path(directory).name)
+
+    def test_alert_text_names_the_account_and_the_number(self):
+        cfg = {"account_name": "ethan", "username": "015100000000"}
+        self.assertEqual(
+            aldi.alert_subject(cfg, "refill booked"),
+            "[ALDI TALK ethan] refill booked",
+        )
+        self.assertIn("Account: ethan (015100000000)", aldi.alert_header(cfg))
+        self.assertIn(
+            "Account: main", aldi.alert_header({"username": "015100000000"})
+        )
 
     def test_config_rejects_a_broad_browser_profile_path(self):
         with TemporaryDirectory() as directory:
@@ -904,6 +973,7 @@ class AlertsTest(unittest.TestCase):
         }
 
         with (
+            patch.object(aldi, "read_watch_state", return_value={}),
             patch.object(aldi.time, "sleep") as sleep,
             patch.object(aldi, "send_alert") as alert,
             patch.object(aldi, "write_watch_state"),
@@ -916,6 +986,138 @@ class AlertsTest(unittest.TestCase):
         alert.assert_called_once()
         self.assertIn("refill booked", alert.call_args.args[1])
 
+    def test_watch_sends_no_mail_for_a_refill_when_booking_alerts_are_off(self):
+        client = self.make_client()
+        live_offer = offer()
+        client.ensure_session = lambda: ({}, live_offer, live_offer["pack"])
+        client.book_one_gb = Mock(return_value=({}, live_offer, live_offer["pack"]))
+        cfg = {
+            "watch_interval_seconds": 600,
+            "jitter_fraction": 0.2,
+            "alerts": dict(self.ALERTS, on_booking=False, on_failure=False),
+            "account_name": "main",
+            "username": "015100000000",
+        }
+
+        with (
+            patch.object(aldi, "read_watch_state", return_value={}),
+            patch.object(aldi, "send_alert") as alert,
+            patch.object(aldi, "write_watch_state"),
+            patch.object(
+                aldi.time, "sleep", side_effect=[None, KeyboardInterrupt]
+            ),
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                aldi.cmd_watch(cfg, client)
+            except KeyboardInterrupt:
+                pass
+
+        self.assertEqual(client.book_one_gb.call_count, 2)
+        alert.assert_not_called()
+
+    def test_watch_stops_eu_only_refills_once_the_eu_volume_stays_low(self):
+        client = self.make_client()
+        domestic = data_pack(allocated=25_000_000, used=1_000_000)
+        eu = data_pack(allocated="1.60432128E7", used="16043212.0")
+        eu["balanceAttributeReference"] = "dataGrantAmountFUP"
+        live_offer = offer(pack=[domestic, eu])
+        client.ensure_session = lambda: ({}, live_offer, live_offer["pack"])
+        client.book_one_gb = Mock(return_value=({}, live_offer, live_offer["pack"]))
+        state = {}
+        cfg = {
+            "watch_interval_seconds": 600,
+            "jitter_fraction": 0.2,
+            "alerts": dict(self.ALERTS, on_booking=False, on_failure=True),
+            "account_name": "ethan",
+            "username": "015100000000",
+        }
+
+        def fake_write(**kwargs):
+            for key, value in kwargs.items():
+                if value is not aldi._KEEP:
+                    state[key] = value
+
+        with (
+            patch.object(aldi, "read_watch_state", return_value=state),
+            patch.object(aldi, "write_watch_state", side_effect=fake_write),
+            patch.object(aldi, "send_alert", return_value=True) as alert,
+            patch.object(aldi.time, "sleep", side_effect=[None, KeyboardInterrupt]),
+            redirect_stdout(StringIO()),
+        ):
+            try:
+                aldi.cmd_watch(cfg, client)
+            except KeyboardInterrupt:
+                pass
+
+        self.assertEqual(client.book_one_gb.call_count, 1)
+        self.assertTrue(state.get("eu_refill_stalled"))
+        alert.assert_called_once()
+        self.assertIn("EU roaming volume", alert.call_args.args[1])
+        self.assertIn("[ALDI TALK ethan]", alert.call_args.args[1])
+        self.assertIn("Account: ethan (015100000000)", alert.call_args.args[2])
+
+    def test_failure_alert_respects_the_cooldown(self):
+        cfg = {"account_name": "ethan", "username": "015100000000"}
+        recent = {"last_failure_alert_ts": time.time() - 60}
+        with (
+            patch.object(aldi, "read_watch_state", return_value=recent),
+            patch.object(aldi, "send_alert") as alert,
+            patch.object(aldi, "write_watch_state") as write,
+            redirect_stdout(StringIO()) as out,
+        ):
+            self.assertFalse(
+                aldi.send_failure_alert(self.ALERTS, cfg, "login rejected", "body")
+            )
+        alert.assert_not_called()
+        write.assert_not_called()
+        self.assertIn("suppressed", out.getvalue())
+
+        expired = {"last_failure_alert_ts": time.time() - 7 * 3600}
+        with (
+            patch.object(aldi, "read_watch_state", return_value=expired),
+            patch.object(aldi, "send_alert", return_value=True) as alert,
+            patch.object(aldi, "write_watch_state") as write,
+        ):
+            self.assertTrue(
+                aldi.send_failure_alert(self.ALERTS, cfg, "login rejected", "body")
+            )
+        alert.assert_called_once()
+        self.assertIn("[ALDI TALK ethan] login rejected", alert.call_args.args[1])
+        self.assertIn("Account: ethan (015100000000)", alert.call_args.args[2])
+        write.assert_called_once()
+        self.assertGreater(write.call_args.kwargs["last_failure_alert_ts"], 0)
+
+    def test_failure_alert_records_only_after_a_successful_delivery(self):
+        cfg = {"account_name": "main", "username": "015100000000"}
+        with (
+            patch.object(aldi, "read_watch_state", return_value={}),
+            patch.object(aldi, "send_alert", return_value=False),
+            patch.object(aldi, "write_watch_state") as write,
+        ):
+            self.assertFalse(
+                aldi.send_failure_alert(self.ALERTS, cfg, "login rejected", "body")
+            )
+        write.assert_not_called()
+
+    def test_failure_alert_is_skipped_when_failures_are_muted(self):
+        cfg = {"account_name": "main"}
+        with (
+            patch.object(aldi, "read_watch_state", return_value={}),
+            patch.object(aldi, "send_alert") as alert,
+            patch.object(aldi, "write_watch_state") as write,
+        ):
+            self.assertFalse(
+                aldi.send_failure_alert(
+                    dict(self.ALERTS, on_failure=False),
+                    cfg,
+                    "login rejected",
+                    "body",
+                )
+            )
+        alert.assert_not_called()
+        write.assert_not_called()
+
     def test_watch_alerts_once_at_the_failure_threshold(self):
         client = self.make_client()
         client.ensure_session = Mock(side_effect=RuntimeError("boom"))
@@ -923,9 +1125,12 @@ class AlertsTest(unittest.TestCase):
             "watch_interval_seconds": 600,
             "jitter_fraction": 0.2,
             "alerts": dict(self.ALERTS, failure_threshold=3),
+            "account_name": "main",
+            "username": "015100000000",
         }
 
         with (
+            patch.object(aldi, "read_watch_state", return_value={}),
             patch.object(aldi.time, "sleep") as sleep,
             patch.object(aldi, "send_alert") as alert,
             patch.object(aldi, "write_watch_state"),
@@ -939,6 +1144,7 @@ class AlertsTest(unittest.TestCase):
 
         alert.assert_called_once()
         self.assertIn("3 consecutive", alert.call_args.args[1])
+        self.assertIn("Account: main (015100000000)", alert.call_args.args[2])
 
 
 if __name__ == "__main__":

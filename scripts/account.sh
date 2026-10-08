@@ -172,7 +172,7 @@ try:
             "resend_api_key": api_key,
             "from": sender,
             "to": answer,
-            "on_booking": bool(inherited.get("on_booking", True)),
+            "on_booking": False,
             "on_failure": bool(inherited.get("on_failure", True)),
             "failure_threshold": max(1, threshold),
         }

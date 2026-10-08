@@ -78,6 +78,8 @@ Verified against the live portal:
 | 2026-08-24 | Headless server (Xvfb + headed Chrome) logged in from a US IP |
 | 2026-08-24 | Session self-healing observed live: dead session, auto re-login |
 | 2026-08-24 | Email alert path verified through Resend |
+| 2026-10-08 | Watch cycle prints the German and EU balance; mail to two accounts verified through Resend |
+| 2026-10-08 | Failure-alert cooldown verified live: second mail inside 6 h suppressed |
 
 Automated tests run on every push (see the CI badge in your repository).
 
@@ -171,7 +173,7 @@ Windows support is code-complete but not runtime-tested. Report failures instead
     "resend_api_key": "env:RESEND_API_KEY",
     "from": "alerts@your-verified-domain.de",
     "to": "you@example.com",
-    "on_booking": true,
+    "on_booking": false,
     "on_failure": true,
     "failure_threshold": 3
   }
@@ -311,17 +313,21 @@ A second always-on machine receives an hourly signed heartbeat from the writer. 
 
 Alerts are optional. Delete the `alerts` object to run silent.
 
+Every account has its own `to`, so each person only receives mail about their own line. Subjects and bodies name the account, for example `[ALDI TALK ethan]` and `Account: ethan (015112345678)`.
+
 The client sends mail through [Resend](https://resend.com). `from` must use a domain that you verified in Resend.
 
 `resend_api_key` accepts a literal key or an `env:NAME` indirection. Prefer `env:` and export the variable in the service environment. The client reads it at send time only.
 
 The watcher sends these mails:
 
-- One confirmation after each booked refill, when `on_booking` is true.
-- One alert when failures reach `failure_threshold` in a row.
+- One alert when failures reach `failure_threshold` in a row. It carries the error, the account, and the next attempt time.
 - One final alert before exit on a rejected password or a required SMS check.
+- One alert when a free refill does not raise the EU roaming volume.
 
-A failed delivery never stops the watcher. It prints one log line instead.
+Successful refills stay silent. Set `"on_booking": true` to get one mail per booked refill.
+
+Failure mails respect a 6 hour cooldown that is recorded in `.watch-state.json`. A watcher that exits and restarts every minute mails once per cooldown window instead of once per minute. A failed delivery never starts the cooldown and never stops the watcher; it prints one log line instead.
 
 ## SMS verification fallback
 
@@ -406,7 +412,7 @@ Run the automated tests:
 .venv/bin/python -m unittest -v
 ```
 
-48 tests cover login callbacks, offer selection, threshold boundaries, booking payloads, OTP handling, session expiry, transient retry, watch-state and booking logs, email alerts, write safety, and the browser transport.
+62 tests cover login callbacks, offer selection, threshold boundaries, EU fair-use refill decisions, booking payloads, OTP handling, session expiry, transient retry, watch-state and booking logs, email alerts and their cooldown, write safety, and the browser transport.
 
 The source HAR stays outside this repository. It contains account data.
 

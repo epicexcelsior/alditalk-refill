@@ -12,7 +12,7 @@
     "resend_api_key": "env:RESEND_API_KEY",
     "from": "alerts@your-verified-domain.de",
     "to": "you@example.com",
-    "on_booking": true,
+    "on_booking": false,
     "on_failure": true,
     "failure_threshold": 3
   }

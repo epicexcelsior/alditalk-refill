@@ -46,7 +46,7 @@ POST .../selfcare-dashboard/v1/validateOtp        (OTP flows only)
 POST .../selfcare-dashboard/v1/offer/updateUnlimited
 ```
 
-Fields: domestic pack = `pack[]` item with `type=="data"` and `balanceAttributeReference != "dataGrantAmountFUP"`; values in KiB. Booking amount/threshold come live from `refillThresholdValueUid`. HTTP 490 = session dead, re-login once.
+Fields: domestic pack = `pack[]` item with `type=="data"` and `balanceAttributeReference != "dataGrantAmountFUP"`; values in KiB. The `dataGrantAmountFUP` pack is the EU fair-use grant: fractional KiB, about 15.30 GB on Tarif S. EU usage drains the domestic volume, which the free refill restores. The watcher books an EU-only refill once and then stops if the EU figure does not rise. Booking amount/threshold come live from `refillThresholdValueUid`. HTTP 490 = session dead, re-login once.
 
 ## Setup runbook
 
@@ -88,6 +88,7 @@ Reboot persistence requires `loginctl show-user <user> | grep Linger=yes`.
 | `FATAL OTP automation stopped` | Risk engine wants SMS | User logs in via real browser once; restart |
 | `FATAL credentials rejected` | Bad password | User updates config; restart |
 | Booking verified failure | Not applied | Check portal manually; report; no retry |
+| `EU roaming volume did not rise after a refill` | The free refill moved the German volume only | Watcher stops EU-only refills until the EU figure rises. Check the portal before travelling. |
 | Chrome crashes | Display/RAM problem | Check Xvfb, memory |
 | Update git error 128 | Deploy key broken | Recreate key, reset `core.sshCommand` |
 | Update tests fail | Bad upstream commit | `update.sh` rolls back to previous HEAD automatically |
@@ -129,7 +130,7 @@ Mechanics:
 - Template unit: `systemd/alditalk-refill@.service`, instance name = folder name. Shares the repo venv. Runs under `xvfb-run` and loads `EnvironmentFile=-%h/.alditalk/resend.env` for the alert key, same as the server unit.
 - Interval offset: base 3600 s plus a name checksum (0-899 s), so accounts never poll in sync.
 - Update script restarts every active `alditalk-refill@*` instance after pulling (`daemon-reload` runs first).
-- Alert routing: set each account's own `alerts.to`; one shared Resend key is fine.
+- Alert routing: each account sends only to its own `alerts.to`; one shared Resend key is fine. `on_booking` is false, so refills stay silent. Failure mail carries `[ALDI TALK <name>]` and is limited to one per 6 hours by `last_failure_alert_ts` in `.watch-state.json`. The host-level watchdog still mails only the server owner.
 - Booking history: each verified refill appends to `.watch-bookings.log` in the config dir (repo dir for the main account, account dir for instances). The journal rotates away after days; this file is permanent. Gitignored.
 
 Limits and risks. Keep the total at five or fewer:
