@@ -313,7 +313,7 @@ A second always-on machine receives an hourly signed heartbeat from the writer. 
 
 Alerts are optional. Delete the `alerts` object to run silent.
 
-Every account has its own `to`, so each person only receives mail about their own line. Subjects and bodies name the account, for example `[ALDI TALK ethan]` and `Account: ethan (015112345678)`.
+Every account has its own `to`, so mail never crosses lines by accident. Point it at whoever should hear about that line: a separate owner, or your own inbox for every line you operate. Subjects and bodies name the account, for example `[ALDI TALK ethan]` and `Account: ethan (015112345678)`.
 
 The client sends mail through [Resend](https://resend.com). `from` must use a domain that you verified in Resend.
 

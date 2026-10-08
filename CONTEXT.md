@@ -130,7 +130,7 @@ Mechanics:
 - Template unit: `systemd/alditalk-refill@.service`, instance name = folder name. Shares the repo venv. Runs under `xvfb-run` and loads `EnvironmentFile=-%h/.alditalk/resend.env` for the alert key, same as the server unit.
 - Interval offset: base 3600 s plus a name checksum (0-899 s), so accounts never poll in sync.
 - Update script restarts every active `alditalk-refill@*` instance after pulling (`daemon-reload` runs first).
-- Alert routing: each account sends only to its own `alerts.to`; one shared Resend key is fine. `on_booking` is false, so refills stay silent. Failure mail carries `[ALDI TALK <name>]` and is limited to one per 6 hours by `last_failure_alert_ts` in `.watch-state.json`. The host-level watchdog still mails only the server owner.
+- Alert routing: `alerts.to` is set per config; one shared Resend key is fine. This host sends both accounts to epicexcelsior@gmail.com, so the second line's owner receives no mail at all. `on_booking` is false, so refills stay silent. Failure mail carries `[ALDI TALK <name>]` and is limited to one per 6 hours by `last_failure_alert_ts` in `.watch-state.json`. The host-level watchdog also mails only the server owner.
 - Booking history: each verified refill appends to `.watch-bookings.log` in the config dir (repo dir for the main account, account dir for instances). The journal rotates away after days; this file is permanent. Gitignored.
 
 Limits and risks. Keep the total at five or fewer:
@@ -142,7 +142,7 @@ Limits and risks. Keep the total at five or fewer:
 Consent checklist per person before adding them:
 
 - They know a script holds their password and books refills for them.
-- They know which email receives alerts.
+- They know which email receives alerts. On this host alerts go to you, not to them.
 - They have a way to reach you when their watcher stops.
 
 ## Cadence
