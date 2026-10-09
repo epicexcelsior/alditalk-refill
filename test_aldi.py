@@ -529,6 +529,41 @@ class AldiTalkTests(unittest.TestCase):
             ):
                 aldi.load_config()
 
+    def test_config_rejects_a_malformed_error_to(self):
+        with TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(
+                '{"username":"user","password":"password","alerts":{'
+                '"resend_api_key":"re_x","from":"a@example.com",'
+                '"to":"person@example.com","error_to":"not-an-email"}}',
+                encoding="utf-8",
+            )
+            config_path.chmod(0o600)
+            with (
+                patch.dict(aldi.os.environ, {"ALDITALK_CONFIG_DIR": directory}),
+                self.assertRaisesRegex(SystemExit, "error_to"),
+            ):
+                aldi.load_config()
+
+    def test_config_keeps_the_error_address_separate(self):
+        with TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.json"
+            config_path.write_text(
+                '{"username":"user","password":"password","alerts":{'
+                '"resend_api_key":"re_x","from":"a@example.com",'
+                '"to":"person@example.com","error_to":"operator@example.com"}}',
+                encoding="utf-8",
+            )
+            config_path.chmod(0o600)
+            with (
+                patch.dict(aldi.os.environ, {"ALDITALK_CONFIG_DIR": directory}),
+                redirect_stdout(StringIO()),
+            ):
+                config = aldi.load_config()
+
+        self.assertEqual(config["alerts"]["to"], "person@example.com")
+        self.assertEqual(config["alerts"]["error_to"], "operator@example.com")
+
     def test_browser_transport_fetches_json_in_the_page_context(self):
         client = aldi.ChromeAldiTalk("user", "password")
         client._page = FakeBrowserPage(
@@ -912,6 +947,7 @@ class AlertsTest(unittest.TestCase):
         "resend_api_key": "env:RESEND_API_KEY",
         "from": "alerts@example.com",
         "to": "user@example.com",
+        "error_to": "operator@example.com",
         "on_booking": True,
         "on_failure": True,
         "failure_threshold": 3,
@@ -960,6 +996,41 @@ class AlertsTest(unittest.TestCase):
 
     def test_send_alert_without_config_is_a_noop(self):
         self.assertFalse(aldi.send_alert(None, "s", "b"))
+
+    def test_send_error_alert_goes_to_the_operator_address(self):
+        sent = {}
+
+        def fake_post(url, **kwargs):
+            sent["kwargs"] = kwargs
+            return FakeResponse({"id": "abc"}, status_code=200)
+
+        with (
+            patch.dict(aldi.os.environ, {"RESEND_API_KEY": "re_test123"}),
+            patch.object(aldi.requests, "post", side_effect=fake_post),
+        ):
+            ok = aldi.send_error_alert(self.ALERTS, "Subject", "Body")
+
+        self.assertTrue(ok)
+        self.assertEqual(sent["kwargs"]["json"]["to"], ["operator@example.com"])
+
+    def test_send_error_alert_falls_back_to_the_account_address(self):
+        alerts = dict(self.ALERTS, error_to=None)
+        sent = {}
+
+        def fake_post(url, **kwargs):
+            sent["kwargs"] = kwargs
+            return FakeResponse({"id": "abc"}, status_code=200)
+
+        with (
+            patch.dict(aldi.os.environ, {"RESEND_API_KEY": "re_test123"}),
+            patch.object(aldi.requests, "post", side_effect=fake_post),
+        ):
+            self.assertTrue(aldi.send_error_alert(alerts, "Subject", "Body"))
+
+        self.assertEqual(sent["kwargs"]["json"]["to"], ["user@example.com"])
+
+    def test_send_error_alert_without_config_is_a_noop(self):
+        self.assertFalse(aldi.send_error_alert(None, "s", "b"))
 
     def test_watch_sends_one_booking_alert(self):
         client = self.make_client()
@@ -1041,7 +1112,7 @@ class AlertsTest(unittest.TestCase):
         with (
             patch.object(aldi, "read_watch_state", return_value=state),
             patch.object(aldi, "write_watch_state", side_effect=fake_write),
-            patch.object(aldi, "send_alert", return_value=True) as alert,
+            patch.object(aldi, "send_error_alert", return_value=True) as alert,
             patch.object(aldi.time, "sleep", side_effect=[None, KeyboardInterrupt]),
             redirect_stdout(StringIO()),
         ):
@@ -1062,7 +1133,7 @@ class AlertsTest(unittest.TestCase):
         recent = {"last_failure_alert_ts": time.time() - 60}
         with (
             patch.object(aldi, "read_watch_state", return_value=recent),
-            patch.object(aldi, "send_alert") as alert,
+            patch.object(aldi, "send_error_alert") as alert,
             patch.object(aldi, "write_watch_state") as write,
             redirect_stdout(StringIO()) as out,
         ):
@@ -1076,7 +1147,7 @@ class AlertsTest(unittest.TestCase):
         expired = {"last_failure_alert_ts": time.time() - 7 * 3600}
         with (
             patch.object(aldi, "read_watch_state", return_value=expired),
-            patch.object(aldi, "send_alert", return_value=True) as alert,
+            patch.object(aldi, "send_error_alert", return_value=True) as alert,
             patch.object(aldi, "write_watch_state") as write,
         ):
             self.assertTrue(
@@ -1092,7 +1163,7 @@ class AlertsTest(unittest.TestCase):
         cfg = {"account_name": "main", "username": "015100000000"}
         with (
             patch.object(aldi, "read_watch_state", return_value={}),
-            patch.object(aldi, "send_alert", return_value=False),
+            patch.object(aldi, "send_error_alert", return_value=False),
             patch.object(aldi, "write_watch_state") as write,
         ):
             self.assertFalse(
@@ -1104,7 +1175,7 @@ class AlertsTest(unittest.TestCase):
         cfg = {"account_name": "main"}
         with (
             patch.object(aldi, "read_watch_state", return_value={}),
-            patch.object(aldi, "send_alert") as alert,
+            patch.object(aldi, "send_error_alert") as alert,
             patch.object(aldi, "write_watch_state") as write,
         ):
             self.assertFalse(
@@ -1132,7 +1203,7 @@ class AlertsTest(unittest.TestCase):
         with (
             patch.object(aldi, "read_watch_state", return_value={}),
             patch.object(aldi.time, "sleep") as sleep,
-            patch.object(aldi, "send_alert") as alert,
+            patch.object(aldi, "send_error_alert") as alert,
             patch.object(aldi, "write_watch_state"),
             redirect_stdout(StringIO()),
         ):
@@ -1145,6 +1216,31 @@ class AlertsTest(unittest.TestCase):
         alert.assert_called_once()
         self.assertIn("3 consecutive", alert.call_args.args[1])
         self.assertIn("Account: main (015100000000)", alert.call_args.args[2])
+
+    def test_watch_failure_alert_never_reaches_the_account_address(self):
+        client = self.make_client()
+        client.ensure_session = Mock(side_effect=RuntimeError("boom"))
+        cfg = {
+            "watch_interval_seconds": 600,
+            "jitter_fraction": 0.2,
+            "alerts": dict(self.ALERTS, failure_threshold=1),
+        }
+
+        with (
+            patch.object(aldi.time, "sleep") as sleep,
+            patch.object(aldi, "send_error_alert") as error_alert,
+            patch.object(aldi, "send_alert") as booking_alert,
+            patch.object(aldi, "write_watch_state"),
+            redirect_stdout(StringIO()),
+        ):
+            sleep.side_effect = [KeyboardInterrupt]
+            try:
+                aldi.cmd_watch(cfg, client)
+            except KeyboardInterrupt:
+                pass
+
+        error_alert.assert_called_once()
+        booking_alert.assert_not_called()
 
 
 if __name__ == "__main__":

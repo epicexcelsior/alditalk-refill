@@ -134,11 +134,11 @@ try:
 
     current_alerts = cfg.get("alerts") if isinstance(cfg.get("alerts"), dict) else {}
     if new or not current_alerts:
-        prompt = "Alert email for this person (blank = no alerts): "
+        prompt = "Refill alert email for this person (blank = no alerts): "
     else:
         keep = current_alerts.get("to", "")
         prompt = (
-            "Alert email (Enter = keep current, none = disable)"
+            "Refill alert email (Enter = keep current, none = disable)"
             + (" [" + keep + "]" if keep else "")
             + ": "
         )
@@ -168,7 +168,14 @@ try:
             threshold = int(inherited.get("failure_threshold", 3))
         except (TypeError, ValueError):
             threshold = 3
-        cfg["alerts"] = {
+        # Failure emails stay with the operator. Take the operator address from
+        # the main config so a new account never mails its errors to this person.
+        error_to = inherited.get("error_to")
+        if not (isinstance(error_to, str) and "@" in error_to):
+            error_to = inherited.get("to")
+        if not (isinstance(error_to, str) and "@" in error_to):
+            error_to = None
+        account_alerts = {
             "resend_api_key": api_key,
             "from": sender,
             "to": answer,
@@ -176,6 +183,9 @@ try:
             "on_failure": bool(inherited.get("on_failure", True)),
             "failure_threshold": max(1, threshold),
         }
+        if error_to:
+            account_alerts["error_to"] = error_to
+        cfg["alerts"] = account_alerts
 
     if interval:
         cfg["watch_interval_seconds"] = int(interval)

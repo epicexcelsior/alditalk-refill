@@ -162,6 +162,11 @@ def load_config():
             value = raw_alerts.get(field)
             if not isinstance(value, str) or "@" not in value:
                 sys.exit(f"alerts.{field} must contain an email address.")
+        error_to = raw_alerts.get("error_to")
+        if error_to is not None and (
+            not isinstance(error_to, str) or "@" not in error_to
+        ):
+            sys.exit("alerts.error_to must contain an email address or be null.")
         try:
             failure_threshold = int(raw_alerts.get("failure_threshold", 3))
         except (TypeError, ValueError):
@@ -172,10 +177,15 @@ def load_config():
             "resend_api_key": api_key,
             "from": raw_alerts["from"],
             "to": raw_alerts["to"],
+            "error_to": error_to,
             "on_booking": bool(raw_alerts.get("on_booking", False)),
             "on_failure": bool(raw_alerts.get("on_failure", True)),
             "failure_threshold": failure_threshold,
         }
+        if alerts_cfg["on_failure"] and not alerts_cfg["error_to"]:
+            print(
+                "Note: alerts.error_to is unset. Failure emails go to alerts.to."
+            )
 
     chrome_path = cfg.get("chrome_path")
     if chrome_path is not None and not isinstance(chrome_path, str):
@@ -227,8 +237,26 @@ def resolve_secret(value):
 
 
 def send_alert(alerts_cfg, subject, body):
+    """Send a booking notice to the address that owns this account."""
     if not alerts_cfg:
         return False
+    return _post_alert(alerts_cfg, alerts_cfg["to"], subject, body)
+
+
+def send_error_alert(alerts_cfg, subject, body):
+    """Send a failure notice to alerts.error_to only.
+
+    Other people must never see another person's failure, so this address is
+    separate from alerts.to. Configs written before error_to existed fall back
+    to alerts.to.
+    """
+    if not alerts_cfg:
+        return False
+    recipient = alerts_cfg.get("error_to") or alerts_cfg["to"]
+    return _post_alert(alerts_cfg, recipient, subject, body)
+
+
+def _post_alert(alerts_cfg, recipient, subject, body):
     api_key = resolve_secret(alerts_cfg["resend_api_key"])
     if not api_key:
         print("Alert skipped: resend API key unavailable (env var unset?).")
@@ -238,7 +266,7 @@ def send_alert(alerts_cfg, subject, body):
             RESEND_API_URL,
             json={
                 "from": alerts_cfg["from"],
-                "to": [alerts_cfg["to"]],
+                "to": [recipient],
                 "subject": subject,
                 "text": body,
             },
@@ -282,7 +310,9 @@ def send_failure_alert(alerts_cfg, cfg, title, body):
             f"(cooldown {FAILURE_ALERT_COOLDOWN_SECONDS // 60} min)."
         )
         return False
-    sent = send_alert(alerts_cfg, alert_subject(cfg, title), alert_header(cfg) + body)
+    sent = send_error_alert(
+        alerts_cfg, alert_subject(cfg, title), alert_header(cfg) + body
+    )
     if sent:
         write_watch_state(last_failure_alert_ts=int(now))
     return sent
@@ -1612,7 +1642,7 @@ def cmd_watch(cfg, client):
                         )
                     send_alert(alerts, alert_subject(cfg, "refill booked"), body)
                 if stalled_after and not stalled and alerts and alerts["on_failure"]:
-                    send_alert(
+                    send_error_alert(
                         alerts,
                         alert_subject(
                             cfg, "EU roaming volume did not rise after a refill"

@@ -173,6 +173,7 @@ Windows support is code-complete but not runtime-tested. Report failures instead
     "resend_api_key": "env:RESEND_API_KEY",
     "from": "alerts@your-verified-domain.de",
     "to": "you@example.com",
+    "error_to": "operator@example.com",
     "on_booking": false,
     "on_failure": true,
     "failure_threshold": 3
@@ -317,13 +318,19 @@ Every account has its own `to`, so mail never crosses lines by accident. Point i
 
 The client sends mail through [Resend](https://resend.com). `from` must use a domain that you verified in Resend.
 
+Two addresses keep mail separated by person:
+
+- `to` receives the refill confirmations for this account. Set one address per account.
+- `error_to` receives every failure. Keep one operator address here, so no other person sees your errors. When `error_to` is missing, failures go to `to`.
+
 `resend_api_key` accepts a literal key or an `env:NAME` indirection. Prefer `env:` and export the variable in the service environment. The client reads it at send time only.
 
 The watcher sends these mails:
 
-- One alert when failures reach `failure_threshold` in a row. It carries the error, the account, and the next attempt time.
-- One final alert before exit on a rejected password or a required SMS check.
-- One alert when a free refill does not raise the EU roaming volume.
+- One confirmation after each booked refill, when `on_booking` is true. It goes to `to`.
+- One alert when failures reach `failure_threshold` in a row. It goes to `error_to`. It carries the error, the account, and the next attempt time.
+- One final alert before exit on a rejected password or a required SMS check. It goes to `error_to`.
+- One alert when a free refill does not raise the EU roaming volume. It goes to `error_to`.
 
 Successful refills stay silent. Set `"on_booking": true` to get one mail per booked refill.
 
@@ -412,7 +419,7 @@ Run the automated tests:
 .venv/bin/python -m unittest -v
 ```
 
-62 tests cover login callbacks, offer selection, threshold boundaries, EU fair-use refill decisions, booking payloads, OTP handling, session expiry, transient retry, watch-state and booking logs, email alerts and their cooldown, write safety, and the browser transport.
+68 tests cover login callbacks, offer selection, threshold boundaries, EU fair-use refill decisions, booking payloads, OTP handling, session expiry, transient retry, watch-state and booking logs, email alerts, their cooldown and their routing, write safety, and the browser transport.
 
 The source HAR stays outside this repository. It contains account data.
 

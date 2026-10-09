@@ -68,12 +68,14 @@ journalctl --user -u alditalk-refill-server -n 20 -o cat --no-pager
 # force update now
 systemctl --user start alditalk-refill-update.service
 
-# test alert email
+# test alert email (refill path -> alerts.to, error path -> alerts.error_to)
 cd ~/alditalk-refill && set -a && . ~/.alditalk/resend.env && set +a
 xvfb-run -a .venv/bin/python -c "
 import json,pathlib,aldi,time
 cfg=json.loads((pathlib.Path.home()/'alditalk-refill/config.json').read_text())
-print(aldi.send_alert(cfg['alerts'],'ALDI test',time.strftime('%F %T')))"
+stamp=time.strftime('%F %T')
+print('booking:', aldi.send_alert(cfg['alerts'],'ALDI test',stamp))
+print('error:  ', aldi.send_error_alert(cfg['alerts'],'ALDI test',stamp))"
 ```
 
 Reboot persistence requires `loginctl show-user <user> | grep Linger=yes`.
@@ -126,11 +128,13 @@ scripts/account.sh remove <name>      # stop + archive
 
 Mechanics:
 
-- No manual file editing: `add`/`configure` prompt on stdin (hidden password on a tty), inherit `alerts.resend_api_key`/`from` from the main `config.json`, write atomically with chmod 600, validate through the real loader, and run a read-only `check` before (re)starting. A failed check leaves the account stopped instead of crash-looping. Flags: `--no-check`, `--no-start`. `ALDITALK_ACCOUNTS_DIR` overrides `~/alditalk-accounts` for sandbox testing only; the unit template hardcodes the default path, so starting from an override dir is refused.
+- No manual file editing: `add`/`configure` prompt on stdin (hidden password on a tty), inherit `alerts.resend_api_key`/`from`/`error_to` from the main `config.json`, write atomically with chmod 600, validate through the real loader, and run a read-only `check` before (re)starting. A failed check leaves the account stopped instead of crash-looping. Flags: `--no-check`, `--no-start`. `ALDITALK_ACCOUNTS_DIR` overrides `~/alditalk-accounts` for sandbox testing only; the unit template hardcodes the default path, so starting from an override dir is refused.
 - Template unit: `systemd/alditalk-refill@.service`, instance name = folder name. Shares the repo venv. Runs under `xvfb-run` and loads `EnvironmentFile=-%h/.alditalk/resend.env` for the alert key, same as the server unit.
 - Interval offset: base 3600 s plus a name checksum (0-899 s), so accounts never poll in sync.
 - Update script restarts every active `alditalk-refill@*` instance after pulling (`daemon-reload` runs first).
-- Alert routing: `alerts.to` is set per config; one shared Resend key is fine. This host sends both accounts to epicexcelsior@gmail.com, so the second line's owner receives no mail at all. `on_booking` is false, so refills stay silent. Failure mail carries `[ALDI TALK <name>]` and is limited to one per 6 hours by `last_failure_alert_ts` in `.watch-state.json`. The host-level watchdog also mails only the server owner.
+- Alert routing: `alerts.to` is set per config, `alerts.error_to` holds one operator address, and `account.sh` inherits `error_to` from the main `config.json`, so a new account never mails its errors to that person. One shared Resend key is fine.
+- Failure mail always goes to `error_to`. Set `error_to` to epicexcelsior@gmail.com on every config, so no owner ever sees a failure.
+- Refill mail goes to `to` and stays off on this host: `on_booking` is false, so both accounts' owners receive no mail. Failure mail carries `[ALDI TALK <name>]` and is limited to one per 6 hours by `last_failure_alert_ts` in `.watch-state.json`. The host-level watchdog also mails only the server owner.
 - Booking history: each verified refill appends to `.watch-bookings.log` in the config dir (repo dir for the main account, account dir for instances). The journal rotates away after days; this file is permanent. Gitignored.
 
 Limits and risks. Keep the total at five or fewer:
